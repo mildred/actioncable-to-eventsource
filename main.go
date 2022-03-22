@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/potato2003/actioncable-client-go"
-	"gopkg.in/antage/eventsource.v1"
+	//"gopkg.in/antage/eventsource.v1"
 )
 
 var logDebug = log.Default()
@@ -25,7 +25,7 @@ type Client struct {
 
 	id            string
 	lastId        int
-	es            eventsource.EventSource
+	es            *Broker // eventsource.EventSource
 	cable         *actioncable.Consumer
 	subscriptions []*actioncable.Subscription
 }
@@ -34,22 +34,25 @@ func NewClient(cableServer *url.URL, w http.ResponseWriter, r *http.Request) *Cl
 	var err error
 	c := &Client{
 		CableServer: cableServer,
-		es: eventsource.New(&eventsource.Settings{
-			Timeout:        5 * time.Second,
-			CloseOnTimeout: false,
-			IdleTimeout:    30 * time.Minute,
-		}, func(req *http.Request) [][]byte {
-			return [][]byte{
-				//[]byte("Connection: close"),
-				[]byte("Transfer-Encoding: chunked"),
-				[]byte("Cache-Control: no-cache"),
-				[]byte("Content-Type: text/event-stream"),
-				[]byte("Access-Control-Allow-Methods: GET, POST"),
-				[]byte("Access-Control-Allow-Headers: Content-Type, Cookie"),
-				[]byte("Access-Control-Allow-Origin: *"),
-				[]byte("Access-Control-Allow-Credentials: true"),
-			}
-		}),
+		/*
+			es: eventsource.New(&eventsource.Settings{
+				Timeout:        5 * time.Second,
+				CloseOnTimeout: false,
+				IdleTimeout:    30 * time.Minute,
+			}, func(req *http.Request) [][]byte {
+				return [][]byte{
+					//[]byte("Connection: close"),
+					[]byte("Transfer-Encoding: chunked"),
+					[]byte("Cache-Control: no-cache"),
+					[]byte("Content-Type: text/event-stream"),
+					[]byte("Access-Control-Allow-Methods: GET, POST"),
+					[]byte("Access-Control-Allow-Headers: Content-Type, Cookie"),
+					[]byte("Access-Control-Allow-Origin: *"),
+					[]byte("Access-Control-Allow-Credentials: true"),
+				}
+			}),
+		*/
+		es: NewBroker(),
 		id: r.RequestURI,
 	}
 
@@ -94,7 +97,7 @@ type ChanHandler struct {
 	channel *actioncable.ChannelIdentifier
 }
 
-type Event struct {
+type WsEvent struct {
 	Channel *actioncable.ChannelIdentifier `json:"channel"`
 	Event   *actioncable.SubscriptionEvent `json:"event"`
 }
@@ -103,7 +106,7 @@ func (ch *ChanHandler) sendEvent(event *actioncable.SubscriptionEvent) {
 	id := ch.client.getID()
 	eventType := "message"
 	logDebug.Printf("[%v] Send %s %s: %+v", ch.client.id, eventType, id, event)
-	data, err := json.Marshal(Event{ch.channel, event})
+	data, err := json.Marshal(WsEvent{ch.channel, event})
 	if err != nil {
 		log.Printf("Error sending event (ignoring): %v", err)
 	}
@@ -156,6 +159,7 @@ func (c *Client) Send(channel *actioncable.ChannelIdentifier, message map[string
 	return nil
 }
 
+/*
 func (c *Client) Close() {
 	//for subsc := range c.subscriptions {
 	//	subsc.subscription.Unsubscribe()
@@ -170,6 +174,7 @@ func (c *Client) Close() {
 		c.es = nil
 	}
 }
+*/
 
 type Handler struct {
 	CableServer *url.URL
@@ -213,18 +218,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			logDebug.Printf("[%v] Creating EventSource", r.RequestURI)
 			client := NewClient(h.CableServer, w, r)
 			if client != nil {
-				client.ServeHTTP(w, r)
 				h.clients[r.RequestURI] = client
-				func() { // go func() {
-					logDebug.Printf("[%v] request %+v", r.RequestURI, r)
-					logDebug.Printf("[%v] context %+v", r.RequestURI, r.Context())
-					logDebug.Printf("[%v] Wait for connection to close...", r.RequestURI)
-					<-r.Context().Done() // TODO: find out why the context never cancels
-					// Implementation suggests that when r.ctx is nil, it returns a background context...
-					logDebug.Printf("[%v] Closed connection to EventSource", r.RequestURI)
-					client.Close()
+				client.ServeHTTP(w, r)
+				// go func() {
+				//logDebug.Printf("[%v] request %+v", r.RequestURI, r)
+				//logDebug.Printf("[%v] context %+v", r.RequestURI, r.Context())
+				//logDebug.Printf("[%v] Wait for connection to close...", r.RequestURI)
+				//<-r.Context().Done() // TODO: find out why the context never cancels
+				// Implementation suggests that when r.ctx is nil, it returns a background context...
+				logDebug.Printf("[%v] Closed connection to EventSource", r.RequestURI)
+				//client.Close()
+				if client.es.ConsumersCount() == 0 {
 					delete(h.clients, r.RequestURI)
-				}()
+				}
+				//}()
 			}
 		}
 	} else if r.Method == http.MethodPost {
