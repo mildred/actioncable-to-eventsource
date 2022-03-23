@@ -266,11 +266,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			var id string
 			l.Debugf("[%v] Request: %+v", r.RequestURI, req)
 			identifier, err := GetChanIdentifier(req.Identifier)
-			if err == nil && req.Subscribe {
+			if err == nil && identifier != nil && req.Subscribe {
 				id, err = client.Subscribe(identifier)
-			} else if err == nil && req.Unsubscribe {
+			} else if err == nil && identifier != nil && req.Unsubscribe {
 				id, err = client.Unsubscribe(identifier)
-			} else if err == nil && req.Send != nil {
+			} else if err == nil && identifier != nil && req.Send != nil {
 				id, err = client.Send(identifier, req.Send)
 			} else if err == nil {
 				err = fmt.Errorf("Unknown request")
