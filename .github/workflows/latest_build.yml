@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: GoReleaser build
+    name: Build latest
     runs-on: ubuntu-latest
 
     steps:
@@ -26,20 +26,28 @@ jobs:
         uses: goreleaser/goreleaser-action@master
         with:
           version: latest
-          args: release --rm-dist
+          args: release --rm-dist --snapshot
         #env:
         #  GITHUB_TOKEN: ${{ secrets.GO_RELEASER_GITHUB_TOKEN }}
+
+      - name: Rename and compress built assets
+        run: |
+          for asset in dist/*/*; do
+            xz <"${asset}" >"${asset%/*}.xz"
+          done
 
       - name: Construct release name
         id: vars
         run: |
+          lastver=$(git describe --tags --abbrev=0 HEAD 2>/dev/null || echo v0.0.0)
+          echo ::set-output name=last_ver::$lastver
           if [[ "${GITHUB_REF#refs/tags/}" = "${GITHUB_REF#refs/*/}" ]]; then
             echo ::set-output name=prerelease::false
             echo ::set-output name=release_name::${GITHUB_REF#refs/*/}
           else
             echo ::set-output name=prerelease::true
-            echo ::set-output name=release_name::latest-${GITHUB_REF#refs/*/}
-            git push origin +HEAD:refs/tags/latest-${GITHUB_REF#refs/*/}
+            echo ::set-output name=release_name::${lastver}-latest-${GITHUB_REF#refs/*/}
+            git push origin +HEAD:refs/tags/${lastver}-latest-${GITHUB_REF#refs/*/}
           fi
 
       - name: Release
