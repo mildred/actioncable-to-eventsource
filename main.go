@@ -15,10 +15,16 @@ import (
 	"time"
 
 	"github.com/potato2003/actioncable-client-go"
+	"github.com/segmentio/ksuid"
 	//"gopkg.in/antage/eventsource.v1"
 )
 
 var logDebug = log.Default()
+
+type Subscription struct {
+	*actioncable.Subscription
+	Id string
+}
 
 type Client struct {
 	CableServer *url.URL
@@ -27,7 +33,7 @@ type Client struct {
 	lastId        int
 	es            *Broker // eventsource.EventSource
 	cable         *actioncable.Consumer
-	subscriptions []*actioncable.Subscription
+	subscriptions []*Subscription
 }
 
 func NewClient(cableServer *url.URL, w http.ResponseWriter, r *http.Request) *Client {
@@ -81,10 +87,25 @@ func NewClient(cableServer *url.URL, w http.ResponseWriter, r *http.Request) *Cl
 	return c
 }
 
+type MetaEvent struct {
+	Id   string `json:"id"`
+	Type string `json:"type"`
+}
+
 func (c *Client) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	logDebug.Printf("[%v] Serve HTTP...", c.id)
-	c.es.ServeHTTP(w, r)
-	c.es.SendEventMessage("joined", "meta", c.getID())
+	//c.es.SendEventMessage("joined", "meta", c.getID())
+
+	ctx, cancel := context.WithCancel(r.Context())
+	go func() {
+		<-ctx.Done()
+		data, err := json.Marshal(MetaEvent{Type: "joined", Id: c.id})
+		if err != nil {
+			log.Printf("Error sending event (ignoring): %v", err)
+		}
+		c.es.SendEventMessage(string(data), "message", c.getID())
+	}()
+	c.es.ServeHTTP(w, r, cancel)
 }
 
 func (c *Client) getID() string {
@@ -92,21 +113,43 @@ func (c *Client) getID() string {
 	return fmt.Sprintf("%d", c.lastId)
 }
 
+type ChanIdentifier map[string]interface{}
+
+func GetChanIdentifier(id ChanIdentifier) (*actioncable.ChannelIdentifier, error) {
+	name, ok := id["channel"].(string)
+	if !ok {
+		return nil, fmt.Errorf("Incorrect channel identifier, missing \"channel\" key pair in: %+v", id)
+	}
+	params := make(map[string]interface{})
+	for k, v := range id {
+		if k != "channel" {
+			params[k] = v
+		}
+	}
+	return actioncable.NewChannelIdentifier(name, params), nil
+}
+
 type ChanHandler struct {
 	client  *Client
 	channel *actioncable.ChannelIdentifier
+	id      string
 }
 
 type WsEvent struct {
-	Channel *actioncable.ChannelIdentifier `json:"channel"`
-	Event   *actioncable.SubscriptionEvent `json:"event"`
+	ChanId     string                            `json:"chan_id"`
+	Identifier *actioncable.ChannelIdentifier    `json:"identifier"`
+	Type       actioncable.SubscriptionEventType `json:"type"`
+	Message    interface{}                       `json:"message"`
 }
 
 func (ch *ChanHandler) sendEvent(event *actioncable.SubscriptionEvent) {
 	id := ch.client.getID()
 	eventType := "message"
 	logDebug.Printf("[%v] Send %s %s: %+v", ch.client.id, eventType, id, event)
-	data, err := json.Marshal(WsEvent{ch.channel, event})
+	if event.RawMessage != nil && len(*event.RawMessage) > 0 {
+		event.ReadJSON(&event.Message)
+	}
+	data, err := json.Marshal(WsEvent{ChanId: ch.id, Identifier: ch.channel, Type: event.Type, Message: event.Message})
 	if err != nil {
 		log.Printf("Error sending event (ignoring): %v", err)
 	}
@@ -129,34 +172,48 @@ func (ch *ChanHandler) OnReceived(event *actioncable.SubscriptionEvent) {
 	ch.sendEvent(event)
 }
 
-func (c *Client) Subscribe(channel *actioncable.ChannelIdentifier) error {
-	logDebug.Printf("[%v] Subscribe: %+v", c.id, channel)
-	subsc, err := c.cable.Subscriptions.Create(channel)
-	subsc.SetHandler(&ChanHandler{c, channel})
-	c.subscriptions = append(c.subscriptions, subsc)
-	return err
+func sanitizeChannel(c *actioncable.ChannelIdentifier) *actioncable.ChannelIdentifier {
+	return c
+	/*
+		var res actioncable.ChannelIdentifier
+		data, _ := c.MarshalJSON()
+		json.Unmarshal(data, &res)
+		return &res
+	*/
 }
 
-func (c *Client) Unsubscribe(channel *actioncable.ChannelIdentifier) error {
+func (c *Client) Subscribe(channel *actioncable.ChannelIdentifier) (string, error) {
+	logDebug.Printf("[%v] Subscribe: %+v", c.id, channel)
+	subsc, err := c.cable.Subscriptions.Create(sanitizeChannel(channel))
+	id := ksuid.New().String()
+	subsc.SetHandler(&ChanHandler{c, channel, id})
+	c.subscriptions = append(c.subscriptions, &Subscription{subsc, id})
+	return id, err
+}
+
+func (c *Client) Unsubscribe(channel0 *actioncable.ChannelIdentifier) (string, error) {
+	channel := sanitizeChannel(channel0)
 	for i, subsc := range c.subscriptions {
 		if subsc.Identifier.Equals(channel) {
 			logDebug.Printf("[%v] Unsubscribe: %+v", c.id, channel)
 			c.subscriptions = append(c.subscriptions[:i], c.subscriptions[i+1:]...)
 			subsc.Unsubscribe()
+			return subsc.Id, nil
 		}
 	}
-	return nil
+	return "", nil
 }
 
-func (c *Client) Send(channel *actioncable.ChannelIdentifier, message map[string]interface{}) error {
+func (c *Client) Send(channel0 *actioncable.ChannelIdentifier, message map[string]interface{}) (string, error) {
+	channel := sanitizeChannel(channel0)
 	for _, subsc := range c.subscriptions {
 		if subsc.Identifier.Equals(channel) {
 			logDebug.Printf("[%v] Received message: %+v", c.id, message)
 			subsc.Send(message)
-			return nil
+			return subsc.Id, nil
 		}
 	}
-	return nil
+	return "", nil
 }
 
 /*
@@ -190,18 +247,26 @@ func NewHandler() *Handler {
 }
 
 type Request struct {
-	Channel     *actioncable.ChannelIdentifier `json:"channel"`
-	Subscribe   bool                           `json:"subscribe"`
-	Unsubscribe bool                           `json:"unsubscribe"`
-	Send        map[string]interface{}         `json:"send"`
+	Identifier  ChanIdentifier         `json:"identifier"`
+	Subscribe   bool                   `json:"subscribe"`
+	Unsubscribe bool                   `json:"unsubscribe"`
+	Send        map[string]interface{} `json:"send"`
 }
 
 type Response struct {
-	Error error `json:"error"`
+	ChanId string `json:"chan_id"`
+	Error  error  `json:"error"`
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
+	w.Header().Set("Access-Control-Allow-Origin", r.Header.Get("Origin"))
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Cookie, Content-Type")
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+	} else if r.Method == http.MethodGet {
 		client, ok := h.clients[r.RequestURI]
 		if ok {
 			if h.AllowReuse {
@@ -254,19 +319,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var responses []Response
 
 		for _, req := range requests {
+			var id string
 			logDebug.Printf("[%v] Request: %+v", r.RequestURI, req)
-			if req.Subscribe {
-				err := client.Subscribe(req.Channel)
-				responses = append(responses, Response{Error: err})
-			} else if req.Unsubscribe {
-				err := client.Unsubscribe(req.Channel)
-				responses = append(responses, Response{Error: err})
-			} else if req.Send != nil {
-				err := client.Send(req.Channel, req.Send)
-				responses = append(responses, Response{Error: err})
-			} else {
-				responses = append(responses, Response{Error: fmt.Errorf("Unknown request")})
+			identifier, err := GetChanIdentifier(req.Identifier)
+			if err == nil && req.Subscribe {
+				id, err = client.Subscribe(identifier)
+			} else if err == nil && req.Unsubscribe {
+				id, err = client.Unsubscribe(identifier)
+			} else if err == nil && req.Send != nil {
+				id, err = client.Send(identifier, req.Send)
+			} else if err == nil {
+				err = fmt.Errorf("Unknown request")
 			}
+			responses = append(responses, Response{ChanId: id, Error: err})
 		}
 
 		enc := json.NewEncoder(w)
@@ -329,6 +394,8 @@ func serve(ctx context.Context) error {
 }
 
 func main() {
+	actioncable.SetLogger(NewStandardLibLogger(logDebug))
+
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
@@ -344,4 +411,44 @@ func main() {
 	if err := serve(ctx); err != nil {
 		log.Printf("failed to serve: +%v\n", err)
 	}
+}
+
+type StandardLibLogger struct {
+	logger *log.Logger
+}
+
+func NewStandardLibLogger(l *log.Logger) *StandardLibLogger {
+	return &StandardLibLogger{logger: l}
+}
+
+func (l *StandardLibLogger) Debug(message string) {
+	l.logger.Println(message)
+}
+
+func (l *StandardLibLogger) Debugf(message string, args ...interface{}) {
+	l.logger.Printf(message, args...)
+}
+
+func (l *StandardLibLogger) Info(message string) {
+	l.logger.Println(message)
+}
+
+func (l *StandardLibLogger) Infof(message string, args ...interface{}) {
+	l.logger.Printf(message, args...)
+}
+
+func (l *StandardLibLogger) Warn(message string) {
+	l.Info(message)
+}
+
+func (l *StandardLibLogger) Warnf(message string, args ...interface{}) {
+	l.Infof(message, args...)
+}
+
+func (l *StandardLibLogger) Error(message string) {
+	l.Info(message)
+}
+
+func (l *StandardLibLogger) Errorf(message string, args ...interface{}) {
+	l.Infof(message, args...)
 }
