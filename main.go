@@ -319,6 +319,7 @@ func serve(ctx context.Context) error {
 		err := server.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
 			l.Infof("listen: %+s\n", err)
+			os.Exit(1)
 		}
 	}()
 
