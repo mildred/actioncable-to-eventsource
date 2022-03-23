@@ -38,11 +38,11 @@ type Broker struct {
 
 // Subscribe adds a client to the broker
 func (b *Broker) Subscribe() chan Event {
-	logDebug.Println("request lock")
-	defer logDebug.Println("release lock")
+	l.Debug("request lock")
+	defer l.Debug("release lock")
 	b.Lock()
 	defer b.Unlock()
-	logDebug.Println("subscribing to broker")
+	l.Debug("subscribing to broker")
 	ch := make(chan Event)
 	b.subscribers[ch] = true
 	return ch
@@ -50,22 +50,22 @@ func (b *Broker) Subscribe() chan Event {
 
 // Unsubscribe removes a client from the broker
 func (b *Broker) Unsubscribe(ch chan Event) {
-	logDebug.Println("request lock")
-	defer logDebug.Println("release lock")
+	l.Debug("request lock")
+	defer l.Debug("release lock")
 	b.Lock()
 	defer b.Unlock()
-	logDebug.Println("unsubscribing from broker")
+	l.Debug("unsubscribing from broker")
 	close(ch)
 	delete(b.subscribers, ch)
 }
 
 // Publish sends a slice of bytes to all subscribed clients
 func (b *Broker) Publish(msg Event) {
-	logDebug.Println("request lock")
-	defer logDebug.Println("release lock")
+	l.Debug("request lock")
+	defer l.Debug("release lock")
 	b.Lock()
 	defer b.Unlock()
-	logDebug.Printf("Publishing to %d subscribers\n", len(b.subscribers))
+	l.Debugf("Publishing to %d subscribers\n", len(b.subscribers))
 	for ch := range b.subscribers {
 		ch <- msg
 	}
@@ -106,11 +106,11 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request, cancel contex
 	for {
 		select {
 		case msg := <-ch:
-			logDebug.Println("Send message")
+			l.Debug("Send message")
 			msg.WriteTo(w)
 			f.Flush()
 		case <-ctx.Done():
-			logDebug.Println("Done")
+			l.Debug("Done")
 			return
 		}
 	}

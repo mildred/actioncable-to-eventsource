@@ -16,10 +16,9 @@ import (
 
 	"github.com/potato2003/actioncable-client-go"
 	"github.com/segmentio/ksuid"
-	//"gopkg.in/antage/eventsource.v1"
 )
 
-var logDebug = log.Default()
+var l *StandardLibLogger = NewStandardLibLogger(log.Default())
 
 type Subscription struct {
 	*actioncable.Subscription
@@ -31,7 +30,7 @@ type Client struct {
 
 	id            string
 	lastId        int
-	es            *Broker // eventsource.EventSource
+	es            *Broker
 	cable         *actioncable.Consumer
 	subscriptions []*Subscription
 }
@@ -40,26 +39,8 @@ func NewClient(cableServer *url.URL, w http.ResponseWriter, r *http.Request) *Cl
 	var err error
 	c := &Client{
 		CableServer: cableServer,
-		/*
-			es: eventsource.New(&eventsource.Settings{
-				Timeout:        5 * time.Second,
-				CloseOnTimeout: false,
-				IdleTimeout:    30 * time.Minute,
-			}, func(req *http.Request) [][]byte {
-				return [][]byte{
-					//[]byte("Connection: close"),
-					[]byte("Transfer-Encoding: chunked"),
-					[]byte("Cache-Control: no-cache"),
-					[]byte("Content-Type: text/event-stream"),
-					[]byte("Access-Control-Allow-Methods: GET, POST"),
-					[]byte("Access-Control-Allow-Headers: Content-Type, Cookie"),
-					[]byte("Access-Control-Allow-Origin: *"),
-					[]byte("Access-Control-Allow-Credentials: true"),
-				}
-			}),
-		*/
-		es: NewBroker(),
-		id: r.RequestURI,
+		es:          NewBroker(),
+		id:          r.RequestURI,
 	}
 
 	opt := actioncable.NewConsumerOptions()
@@ -73,16 +54,16 @@ func NewClient(cableServer *url.URL, w http.ResponseWriter, r *http.Request) *Cl
 	c.cable, err = actioncable.CreateConsumer(cableServer, opt)
 
 	if err != nil {
-		log.Printf("Server Error: %v", err)
+		l.Infof("Server Error: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return nil
 	}
 
-	logDebug.Printf("[%v] Connecting to %v", c.id, cableServer)
+	l.Debugf("[%v] Connecting to %v", c.id, cableServer)
 
 	c.cable.Connect() // FIXME: accept a context
 
-	logDebug.Printf("[%v] Connected to %v", c.id, cableServer)
+	l.Debugf("[%v] Connected to %v", c.id, cableServer)
 
 	return c
 }
@@ -93,15 +74,14 @@ type MetaEvent struct {
 }
 
 func (c *Client) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	logDebug.Printf("[%v] Serve HTTP...", c.id)
-	//c.es.SendEventMessage("joined", "meta", c.getID())
+	l.Debugf("[%v] Serve HTTP...", c.id)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	go func() {
 		<-ctx.Done()
 		data, err := json.Marshal(MetaEvent{Type: "joined", Id: c.id})
 		if err != nil {
-			log.Printf("Error sending event (ignoring): %v", err)
+			l.Infof("Error sending event (ignoring): %v", err)
 		}
 		c.es.SendEventMessage(string(data), "message", c.getID())
 	}()
@@ -145,13 +125,13 @@ type WsEvent struct {
 func (ch *ChanHandler) sendEvent(event *actioncable.SubscriptionEvent) {
 	id := ch.client.getID()
 	eventType := "message"
-	logDebug.Printf("[%v] Send %s %s: %+v", ch.client.id, eventType, id, event)
+	l.Debugf("[%v] Send %s %s: %+v", ch.client.id, eventType, id, event)
 	if event.RawMessage != nil && len(*event.RawMessage) > 0 {
 		event.ReadJSON(&event.Message)
 	}
 	data, err := json.Marshal(WsEvent{ChanId: ch.id, Identifier: ch.channel, Type: event.Type, Message: event.Message})
 	if err != nil {
-		log.Printf("Error sending event (ignoring): %v", err)
+		l.Infof("Error sending event (ignoring): %v", err)
 	}
 	ch.client.es.SendEventMessage(string(data), eventType, id)
 }
@@ -172,30 +152,19 @@ func (ch *ChanHandler) OnReceived(event *actioncable.SubscriptionEvent) {
 	ch.sendEvent(event)
 }
 
-func sanitizeChannel(c *actioncable.ChannelIdentifier) *actioncable.ChannelIdentifier {
-	return c
-	/*
-		var res actioncable.ChannelIdentifier
-		data, _ := c.MarshalJSON()
-		json.Unmarshal(data, &res)
-		return &res
-	*/
-}
-
 func (c *Client) Subscribe(channel *actioncable.ChannelIdentifier) (string, error) {
-	logDebug.Printf("[%v] Subscribe: %+v", c.id, channel)
-	subsc, err := c.cable.Subscriptions.Create(sanitizeChannel(channel))
+	l.Debugf("[%v] Subscribe: %+v", c.id, channel)
+	subsc, err := c.cable.Subscriptions.Create(channel)
 	id := ksuid.New().String()
 	subsc.SetHandler(&ChanHandler{c, channel, id})
 	c.subscriptions = append(c.subscriptions, &Subscription{subsc, id})
 	return id, err
 }
 
-func (c *Client) Unsubscribe(channel0 *actioncable.ChannelIdentifier) (string, error) {
-	channel := sanitizeChannel(channel0)
+func (c *Client) Unsubscribe(channel *actioncable.ChannelIdentifier) (string, error) {
 	for i, subsc := range c.subscriptions {
 		if subsc.Identifier.Equals(channel) {
-			logDebug.Printf("[%v] Unsubscribe: %+v", c.id, channel)
+			l.Debugf("[%v] Unsubscribe: %+v", c.id, channel)
 			c.subscriptions = append(c.subscriptions[:i], c.subscriptions[i+1:]...)
 			subsc.Unsubscribe()
 			return subsc.Id, nil
@@ -204,34 +173,16 @@ func (c *Client) Unsubscribe(channel0 *actioncable.ChannelIdentifier) (string, e
 	return "", nil
 }
 
-func (c *Client) Send(channel0 *actioncable.ChannelIdentifier, message map[string]interface{}) (string, error) {
-	channel := sanitizeChannel(channel0)
+func (c *Client) Send(channel *actioncable.ChannelIdentifier, message map[string]interface{}) (string, error) {
 	for _, subsc := range c.subscriptions {
 		if subsc.Identifier.Equals(channel) {
-			logDebug.Printf("[%v] Received message: %+v", c.id, message)
+			l.Debugf("[%v] Received message: %+v", c.id, message)
 			subsc.Send(message)
 			return subsc.Id, nil
 		}
 	}
 	return "", nil
 }
-
-/*
-func (c *Client) Close() {
-	//for subsc := range c.subscriptions {
-	//	subsc.subscription.Unsubscribe()
-	//}
-	logDebug.Printf("[%v] Request to close EventSource, clients connected: %d", c.id, c.es.ConsumersCount())
-	if c.es.ConsumersCount() == 0 {
-		c.es.Close()
-		logDebug.Printf("[%v] Close EventSource", c.id)
-		c.cable.Disconnect()
-		c.subscriptions = nil
-		c.cable = nil
-		c.es = nil
-	}
-}
-*/
 
 type Handler struct {
 	CableServer *url.URL
@@ -270,7 +221,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		client, ok := h.clients[r.RequestURI]
 		if ok {
 			if h.AllowReuse {
-				logDebug.Printf("[%v] Join existing EventSource", r.RequestURI)
+				l.Debugf("[%v] Join existing EventSource", r.RequestURI)
 				client.ServeHTTP(w, r)
 				// TODO: let the EventSource extend past the original connection context
 			} else {
@@ -280,23 +231,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// Perhaps we should close the EventSource to prevent that.
 			}
 		} else {
-			logDebug.Printf("[%v] Creating EventSource", r.RequestURI)
+			l.Debugf("[%v] Creating EventSource", r.RequestURI)
 			client := NewClient(h.CableServer, w, r)
 			if client != nil {
 				h.clients[r.RequestURI] = client
 				client.ServeHTTP(w, r)
-				// go func() {
-				//logDebug.Printf("[%v] request %+v", r.RequestURI, r)
-				//logDebug.Printf("[%v] context %+v", r.RequestURI, r.Context())
-				//logDebug.Printf("[%v] Wait for connection to close...", r.RequestURI)
-				//<-r.Context().Done() // TODO: find out why the context never cancels
-				// Implementation suggests that when r.ctx is nil, it returns a background context...
-				logDebug.Printf("[%v] Closed connection to EventSource", r.RequestURI)
-				//client.Close()
+
+				l.Debugf("[%v] Closed connection to EventSource", r.RequestURI)
 				if client.es.ConsumersCount() == 0 {
 					delete(h.clients, r.RequestURI)
 				}
-				//}()
 			}
 		}
 	} else if r.Method == http.MethodPost {
@@ -320,7 +264,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		for _, req := range requests {
 			var id string
-			logDebug.Printf("[%v] Request: %+v", r.RequestURI, req)
+			l.Debugf("[%v] Request: %+v", r.RequestURI, req)
 			identifier, err := GetChanIdentifier(req.Identifier)
 			if err == nil && req.Subscribe {
 				id, err = client.Subscribe(identifier)
@@ -339,7 +283,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err = enc.Encode(responses)
 
 		if err != nil {
-			log.Printf("Error responding to request, cannot marshal in JSON (ignored): %v", err)
+			l.Infof("Error responding to request, cannot marshal in JSON (ignored): %v", err)
 		}
 	} else {
 		w.WriteHeader(http.StatusBadRequest)
@@ -351,12 +295,17 @@ func serve(ctx context.Context) error {
 	var server http.Server
 	var cable_url string
 	var err error
+	var quiet bool
 	handler := NewHandler()
 
 	flag.StringVar(&server.Addr, "l", ":8080", "Listen address and port")
 	flag.BoolVar(&handler.AllowReuse, "r", false, "Allow reusing EventSource")
+	flag.BoolVar(&l.DebugLevel, "d", false, "Debug log")
+	flag.BoolVar(&quiet, "q", false, "Quiet log")
 	flag.StringVar(&cable_url, "s", "ws://127.0.0.1:3000/cable", "ActionCable URL")
 	flag.Parse()
+
+	l.InfoLevel = !quiet
 
 	handler.CableServer, err = url.Parse(cable_url)
 	if err != nil {
@@ -369,13 +318,13 @@ func serve(ctx context.Context) error {
 	go func() {
 		err := server.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
-			log.Printf("listen: %+s\n", err)
+			l.Infof("listen: %+s\n", err)
 		}
 	}()
 
-	log.Printf("Starting server on %v", server.Addr)
+	l.Infof("Starting server on %v", server.Addr)
 	<-ctx.Done()
-	log.Printf("Stopping server")
+	l.Infof("Stopping server")
 
 	// Stoping server
 
@@ -389,12 +338,12 @@ func serve(ctx context.Context) error {
 		return err
 	}
 
-	log.Printf("Server stopped")
+	l.Infof("Server stopped")
 	return nil
 }
 
 func main() {
-	actioncable.SetLogger(NewStandardLibLogger(logDebug))
+	actioncable.SetLogger(l)
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
@@ -403,52 +352,12 @@ func main() {
 
 	go func() {
 		oscall := <-c
-		log.Printf("system call: %+v", oscall)
+		l.Infof("system call: %+v", oscall)
 		signal.Stop(c)
 		cancel()
 	}()
 
 	if err := serve(ctx); err != nil {
-		log.Printf("failed to serve: +%v\n", err)
+		l.Infof("failed to serve: +%v\n", err)
 	}
-}
-
-type StandardLibLogger struct {
-	logger *log.Logger
-}
-
-func NewStandardLibLogger(l *log.Logger) *StandardLibLogger {
-	return &StandardLibLogger{logger: l}
-}
-
-func (l *StandardLibLogger) Debug(message string) {
-	l.logger.Println(message)
-}
-
-func (l *StandardLibLogger) Debugf(message string, args ...interface{}) {
-	l.logger.Printf(message, args...)
-}
-
-func (l *StandardLibLogger) Info(message string) {
-	l.logger.Println(message)
-}
-
-func (l *StandardLibLogger) Infof(message string, args ...interface{}) {
-	l.logger.Printf(message, args...)
-}
-
-func (l *StandardLibLogger) Warn(message string) {
-	l.Info(message)
-}
-
-func (l *StandardLibLogger) Warnf(message string, args ...interface{}) {
-	l.Infof(message, args...)
-}
-
-func (l *StandardLibLogger) Error(message string) {
-	l.Info(message)
-}
-
-func (l *StandardLibLogger) Errorf(message string, args ...interface{}) {
-	l.Infof(message, args...)
 }
