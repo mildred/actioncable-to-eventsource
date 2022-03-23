@@ -2,8 +2,8 @@ name: Release Go project
 
 on:
   push:
-    tags:
-      - "*" # triggers only if push new tag version, like `0.8.4` or else
+    branches:
+      - master
 
 jobs:
   build:
@@ -26,6 +26,6 @@ jobs:
         uses: goreleaser/goreleaser-action@master
         with:
           version: latest
-          args: release --rm-dist
+          args: release --rm-dist --nightly
         #env:
         #  GITHUB_TOKEN: ${{ secrets.GO_RELEASER_GITHUB_TOKEN }}
