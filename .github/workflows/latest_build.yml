@@ -40,6 +40,7 @@ jobs:
         id: vars
         run: |
           lastver=$(git describe --tags --abbrev=0 HEAD 2>/dev/null || echo v0.0.0)
+          lastver=${lastver%%-*}
           echo ::set-output name=last_ver::$lastver
           if [[ "${GITHUB_REF#refs/tags/}" = "${GITHUB_REF#refs/*/}" ]]; then
             echo ::set-output name=prerelease::false
