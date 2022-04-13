@@ -33,6 +33,31 @@ type Client struct {
 	es            *Broker
 	cable         *actioncable.Consumer
 	subscriptions []*Subscription
+	authHeaders   http.Header
+}
+
+func setRequestOriginIfNotSet(r *http.Request) {
+	// Determine Origin header from Referer
+	if r.Header.Get("Origin") != "" || r.Header.Get("Referer") == "" {
+		return
+	}
+
+	u, err := url.Parse(r.Header.Get("Referer"))
+	if err != nil {
+		l.Infof("Cannot parse Referer to construct Origin header: %v", err)
+		return
+	}
+
+	origin, err := u.Parse("/")
+	if err != nil {
+		l.Infof("Cannot construct Origin header from Referer: %v", err)
+		return
+	}
+
+	origin.Path = ""
+	origin.RawPath = ""
+
+	r.Header.Set("Origin", origin.String())
 }
 
 func NewClient(cableServer *url.URL, w http.ResponseWriter, r *http.Request) *Client {
@@ -41,16 +66,18 @@ func NewClient(cableServer *url.URL, w http.ResponseWriter, r *http.Request) *Cl
 		CableServer: cableServer,
 		es:          NewBroker(),
 		id:          r.RequestURI,
+		authHeaders: http.Header{},
 	}
 
+	setRequestOriginIfNotSet(r)
+
 	opt := actioncable.NewConsumerOptions()
-	header := &http.Header{}
 	for _, head := range []string{"Cookie", "Origin"} {
 		for _, val := range r.Header.Values(head) {
-			header.Add(head, val)
+			c.authHeaders.Add(head, val)
 		}
 	}
-	opt.SetHeader(header)
+	opt.SetHeader(&c.authHeaders)
 	c.cable, err = actioncable.CreateConsumer(cableServer, opt)
 
 	if err != nil {
@@ -61,7 +88,7 @@ func NewClient(cableServer *url.URL, w http.ResponseWriter, r *http.Request) *Cl
 
 	l.Debugf("[%v] Connecting to %v", c.id, cableServer)
 
-	c.cable.Connect() // FIXME: accept a context
+	c.cable.Connect() // FIXME: accepts a context (r.Context())
 
 	l.Debugf("[%v] Connected to %v", c.id, cableServer)
 
@@ -75,6 +102,14 @@ type MetaEvent struct {
 
 func (c *Client) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	l.Debugf("[%v] Serve HTTP...", c.id)
+
+	setRequestOriginIfNotSet(r)
+	for header, _ := range c.authHeaders {
+		if r.Header.Get(header) != c.authHeaders.Get(header) {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+	}
 
 	ctx, cancel := context.WithCancel(r.Context())
 	go func() {
