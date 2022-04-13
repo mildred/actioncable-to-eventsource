@@ -6,6 +6,12 @@ github.com/jpillora/backoff v1.0.0 h1:uvFg412JmmHBHw7iwprIxkPMI+sGQ4kzOWsMeHnm2E
 github.com/jpillora/backoff v1.0.0/go.mod h1:J/6gKK9jxlEcS3zixgDgUAsiuZ7yrSoa/FX5e0EB2j4=
 github.com/jtolds/gls v4.20.0+incompatible h1:xdiiI2gbIgH/gLH7ADydsJ1uDOEzR8yvV7C0MuV77Wo=
 github.com/jtolds/gls v4.20.0+incompatible/go.mod h1:QJZ7F/aHp+rZTRtaJ1ow/lLfFfVYBRgL+9YlvaHOwJU=
+github.com/mildred/actioncable-client-go v0.0.0-20220413144314-95ddcc54dc2a h1:IssgisARhi4s5eQIS1nO5sVZtHNMF7+RdT6ulYJBk2o=
+github.com/mildred/actioncable-client-go v0.0.0-20220413144314-95ddcc54dc2a/go.mod h1:BguHkbH8ti3MvtZX2hAtyZTYeeqRZvCBZxWr0RpcLrI=
+github.com/mildred/actioncable-client-go v0.0.0-20220413160558-cd867483673f h1:+zW7erjfeJkAjpAQ5zRaHmlaFwJbKYPpoyskWPjaXDk=
+github.com/mildred/actioncable-client-go v0.0.0-20220413160558-cd867483673f/go.mod h1:BguHkbH8ti3MvtZX2hAtyZTYeeqRZvCBZxWr0RpcLrI=
+github.com/mildred/actioncable-client-go v0.0.0-20220413160948-c5b76733423f h1:TlmNxFxUkSJId8EstkNgfObzsTIEv7heh7yzKqj/lEg=
+github.com/mildred/actioncable-client-go v0.0.0-20220413160948-c5b76733423f/go.mod h1:BguHkbH8ti3MvtZX2hAtyZTYeeqRZvCBZxWr0RpcLrI=
 github.com/potato2003/actioncable-client-go v0.0.0-20200530121345-f064d751d145 h1:hH1tlm2bp34AqA4Vosyx3oP3ppckBofTWH61ZK2CWJM=
 github.com/potato2003/actioncable-client-go v0.0.0-20200530121345-f064d751d145/go.mod h1:oyKk/WKllybI/RmWLDmorVQprmZhx+cNbpkccweFmY0=
 github.com/segmentio/ksuid v1.0.4 h1:sBo2BdShXjmcugAMwjugoGUdUV0pcxY5mW4xKRn3v4c=

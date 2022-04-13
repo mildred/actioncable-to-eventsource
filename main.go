@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -36,6 +38,8 @@ type Subscription struct {
 type Client struct {
 	CableServer *url.URL
 
+	ctx           context.Context
+	cancel        context.CancelFunc
 	id            string
 	lastId        int
 	es            *Broker
@@ -65,13 +69,18 @@ func setRequestOriginIfNotSet(r *http.Request) {
 	origin.Path = ""
 	origin.RawPath = ""
 
+	l.Debugf("Set Origin: %s", origin.String())
+
 	r.Header.Set("Origin", origin.String())
 }
 
-func NewClient(cableServer *url.URL, w http.ResponseWriter, r *http.Request) *Client {
+func NewClient(ctx0 context.Context, cableServer *url.URL, w http.ResponseWriter, r *http.Request) *Client {
 	var err error
+	ctx, cancel := context.WithCancel(ctx0)
 	c := &Client{
 		CableServer: cableServer,
+		ctx:         ctx,
+		cancel:      cancel,
 		es:          NewBroker(),
 		id:          r.RequestURI,
 		authHeaders: http.Header{},
@@ -79,24 +88,35 @@ func NewClient(cableServer *url.URL, w http.ResponseWriter, r *http.Request) *Cl
 
 	setRequestOriginIfNotSet(r)
 
+	headers := http.Header{}
 	opt := actioncable.NewConsumerOptions()
 	for _, head := range []string{"Cookie", "Origin"} {
 		for _, val := range r.Header.Values(head) {
 			c.authHeaders.Add(head, val)
+			headers.Add(head, val)
 		}
 	}
-	opt.SetHeader(&c.authHeaders)
+	for header, vals := range r.Header {
+		lheader := strings.ToLower(header)
+		if strings.HasPrefix(lheader, "x-forwarded-") ||
+			lheader == "x-real-ip" {
+			headers[header] = vals
+		}
+	}
+	headers.Set("Host", r.Host)
+	opt.SetHeader(&headers)
 	c.cable, err = actioncable.CreateConsumer(cableServer, opt)
 
 	if err != nil {
 		l.Infof("Server Error: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
+		cancel()
 		return nil
 	}
 
 	l.Debugf("[%v] Connecting to %v", c.id, cableServer)
 
-	c.cable.Connect() // FIXME: accepts a context (r.Context())
+	c.cable.Connect(ctx)
 
 	l.Debugf("[%v] Connected to %v", c.id, cableServer)
 
@@ -110,6 +130,15 @@ type MetaEvent struct {
 
 func (c *Client) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	l.Debugf("[%v] Serve HTTP...", c.id)
+
+	defer func() {
+		if c.es.ConsumersCount() == 0 {
+			l.Debugf("[%v] Closed last connection to EventSource", r.RequestURI)
+			c.cancel()
+		} else {
+			l.Debugf("[%v] Closed connection to EventSource (still %d connected)", r.RequestURI, c.es.ConsumersCount())
+		}
+	}()
 
 	setRequestOriginIfNotSet(r)
 	for header, _ := range c.authHeaders {
@@ -228,10 +257,35 @@ func (c *Client) Send(channel *actioncable.ChannelIdentifier, message map[string
 }
 
 type Handler struct {
+	lock        sync.Mutex
 	CableServer *url.URL
 	AllowReuse  bool
 
 	clients map[string]*Client
+}
+
+func (h *Handler) GetClient(request_uri string) (*Client, bool) {
+	h.lock.Lock()
+	defer h.lock.Unlock()
+
+	client, ok := h.clients[request_uri]
+	if ok && client.ctx.Err() == nil {
+		delete(h.clients, request_uri)
+	}
+	return client, ok
+}
+
+func (h *Handler) SetClient(request_uri string, client *Client) {
+	h.lock.Lock()
+	defer h.lock.Unlock()
+
+	h.clients[request_uri] = client
+	go func() {
+		<-client.ctx.Done()
+		h.lock.Lock()
+		defer h.lock.Unlock()
+		delete(h.clients, request_uri)
+	}()
 }
 
 func NewHandler() *Handler {
@@ -261,7 +315,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 	} else if r.Method == http.MethodGet {
-		client, ok := h.clients[r.RequestURI]
+		client, ok := h.GetClient(r.RequestURI)
 		if ok {
 			if h.AllowReuse {
 				l.Debugf("[%v] Join existing EventSource", r.RequestURI)
@@ -275,15 +329,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			l.Debugf("[%v] Creating EventSource", r.RequestURI)
-			client := NewClient(h.CableServer, w, r)
+			var ctx context.Context
+			if h.AllowReuse {
+				ctx = context.Background()
+			} else {
+				ctx = r.Context()
+			}
+			client := NewClient(ctx, h.CableServer, w, r)
 			if client != nil {
-				h.clients[r.RequestURI] = client
+				h.SetClient(r.RequestURI, client)
 				client.ServeHTTP(w, r)
-
-				l.Debugf("[%v] Closed connection to EventSource", r.RequestURI)
-				if client.es.ConsumersCount() == 0 {
-					delete(h.clients, r.RequestURI)
-				}
 			}
 		}
 	} else if r.Method == http.MethodPost {
