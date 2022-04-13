@@ -18,6 +18,14 @@ import (
 	"github.com/segmentio/ksuid"
 )
 
+// export GOFLAGS="-ldflags=-X=main.version=$(git describe --always HEAD)"
+// https://goreleaser.com/cookbooks/using-main.version?h=version
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 var l *StandardLibLogger = NewStandardLibLogger(log.Default())
 
 type Subscription struct {
@@ -338,7 +346,15 @@ func serve(ctx context.Context) error {
 	flag.BoolVar(&l.DebugLevel, "d", false, "Debug log")
 	flag.BoolVar(&quiet, "q", false, "Quiet log")
 	flag.StringVar(&cable_url, "s", "ws://127.0.0.1:3000/cable", "ActionCable URL")
+
+	versionFlag := flag.Bool("version", false, "Show version")
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Printf("Version: %s\n", version)
+		fmt.Printf("Build: %s at %s\n", commit, date)
+		return nil
+	}
 
 	l.InfoLevel = !quiet
 

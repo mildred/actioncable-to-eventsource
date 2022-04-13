@@ -3,7 +3,10 @@ FROM golang:1.16 AS build
 RUN mkdir /src /app
 WORKDIR /src
 COPY . /src
-RUN CGO_ENABLED=0 go build -o /app/actioncable-to-eventsource .
+RUN \
+  CGO_ENABLED=0 \
+  GOFLAGS="-ldflags=-X=main.version=$(git describe --always HEAD)" \
+  go build -o /app/actioncable-to-eventsource .
 
 FROM alpine
 COPY --from=build /app /app
