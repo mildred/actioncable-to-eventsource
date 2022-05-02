@@ -35,6 +35,10 @@ type Subscription struct {
 	Id string
 }
 
+type HttpError struct {
+	Error string `json:"error"`
+}
+
 type Client struct {
 	CableServer *url.URL
 
@@ -113,14 +117,27 @@ func NewClient(ctx0 context.Context, cableServer *url.URL, w http.ResponseWriter
 
 	if err != nil {
 		l.Infof("Server Error: %v", err)
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(&HttpError{
+			Error: http.StatusText(http.StatusInternalServerError),
+		})
 		cancel()
 		return nil
 	}
 
 	l.Debugf("[%v] Connecting to %v", c.id, cableServer)
 
-	c.cable.Connect(ctx)
+	err = c.cable.Connect(ctx)
+	if err != nil {
+		l.Debugf("[%v] Failed to connect: %v", c.id, err.Error())
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(&HttpError{
+			Error: err.Error(),
+		})
+		return nil
+	}
 
 	l.Debugf("[%v] Connected to %v", c.id, cableServer)
 
