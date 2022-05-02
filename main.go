@@ -48,7 +48,7 @@ type Client struct {
 	authHeaders   http.Header
 }
 
-func setRequestOriginIfNotSet(r *http.Request) {
+func setRequestOriginIfNotSet(id string, r *http.Request) {
 	// Determine Origin header from Referer
 	if r.Header.Get("Origin") != "" || r.Header.Get("Referer") == "" {
 		if r.Header.Get("Origin") == "" {
@@ -72,7 +72,7 @@ func setRequestOriginIfNotSet(r *http.Request) {
 	origin.Path = ""
 	origin.RawPath = ""
 
-	l.Debugf("Set Origin: %s", origin.String())
+	l.Debugf("[%v] Set Origin: %s", id, origin.String())
 
 	r.Header.Set("Origin", origin.String())
 }
@@ -89,7 +89,7 @@ func NewClient(ctx0 context.Context, cableServer *url.URL, w http.ResponseWriter
 		authHeaders: http.Header{},
 	}
 
-	setRequestOriginIfNotSet(r)
+	setRequestOriginIfNotSet(c.id, r)
 
 	headers := http.Header{}
 	opt := actioncable.NewConsumerOptions()
@@ -108,7 +108,7 @@ func NewClient(ctx0 context.Context, cableServer *url.URL, w http.ResponseWriter
 	}
 	headers.Set("Host", r.Host)
 	opt.SetHeader(&headers)
-	l.Debugf("Connect to ActionCable %s (Origin: %v)", cableServer, headers.Get("Origin"))
+	l.Debugf("[%v] Connect to ActionCable %s (Origin: %v)", c.id, cableServer, headers.Get("Origin"))
 	c.cable, err = actioncable.CreateConsumer(cableServer, opt)
 
 	if err != nil {
@@ -144,8 +144,8 @@ func (c *Client) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	setRequestOriginIfNotSet(r)
-	for header, _ := range c.authHeaders {
+	setRequestOriginIfNotSet(c.id, r)
+	for header := range c.authHeaders {
 		if r.Header.Get(header) != c.authHeaders.Get(header) {
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -157,7 +157,7 @@ func (c *Client) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		<-ctx.Done()
 		data, err := json.Marshal(MetaEvent{Type: "joined", Id: c.id})
 		if err != nil {
-			l.Infof("Error sending event (ignoring): %v", err)
+			l.Infof("[%v] Error sending event (ignoring): %v", c.id, err)
 		}
 		c.es.SendEventMessage(string(data), "message", c.getID())
 	}()
@@ -201,37 +201,41 @@ type WsEvent struct {
 func (ch *ChanHandler) sendEvent(event *actioncable.SubscriptionEvent) {
 	id := ch.client.getID()
 	eventType := "message"
-	l.Debugf("[%v] Send %s %s: %+v", ch.client.id, eventType, id, event)
+	l.Debugf("[%v#%v] Send %s %s: %+v", ch.client.id, ch.id, eventType, id, event)
 	if event.RawMessage != nil && len(*event.RawMessage) > 0 {
 		event.ReadJSON(&event.Message)
 	}
 	data, err := json.Marshal(WsEvent{ChanId: ch.id, Identifier: ch.channel, Type: event.Type, Message: event.Message})
 	if err != nil {
-		l.Infof("Error sending event (ignoring): %v", err)
+		l.Infof("[%v#%v] Error sending event (ignoring): %v", ch.client.id, ch.id, err)
 	}
 	ch.client.es.SendEventMessage(string(data), eventType, id)
 }
 
 func (ch *ChanHandler) OnConnected(event *actioncable.SubscriptionEvent) {
+	l.Debugf("[%v#%v] connected: %+v", ch.client.id, ch.id, event)
 	ch.sendEvent(event)
 }
 
 func (ch *ChanHandler) OnDisconnected(event *actioncable.SubscriptionEvent) {
+	l.Debugf("[%v#%v] disconnected: %+v", ch.client.id, ch.id, event)
 	ch.sendEvent(event)
 }
 
 func (ch *ChanHandler) OnRejected(event *actioncable.SubscriptionEvent) {
+	l.Debugf("[%v#%v] rejected: %+v", ch.client.id, ch.id, event)
 	ch.sendEvent(event)
 }
 
 func (ch *ChanHandler) OnReceived(event *actioncable.SubscriptionEvent) {
+	l.Debugf("[%v#%v] received: %+v", ch.client.id, ch.id, event)
 	ch.sendEvent(event)
 }
 
 func (c *Client) Subscribe(channel *actioncable.ChannelIdentifier) (string, error) {
-	l.Debugf("[%v] Subscribe: %+v", c.id, channel)
-	subsc, err := c.cable.Subscriptions.Create(channel)
 	id := ksuid.New().String()
+	l.Debugf("[%v#%v] Subscribe: %+v", c.id, id, channel)
+	subsc, err := c.cable.Subscriptions.Create(channel)
 	subsc.SetHandler(&ChanHandler{c, channel, id})
 	c.subscriptions = append(c.subscriptions, &Subscription{subsc, id})
 	return id, err
@@ -240,7 +244,7 @@ func (c *Client) Subscribe(channel *actioncable.ChannelIdentifier) (string, erro
 func (c *Client) Unsubscribe(channel *actioncable.ChannelIdentifier) (string, error) {
 	for i, subsc := range c.subscriptions {
 		if subsc.Identifier.Equals(channel) {
-			l.Debugf("[%v] Unsubscribe: %+v", c.id, channel)
+			l.Debugf("[%v#%v] Unsubscribe: %+v", c.id, subsc.Id, channel)
 			c.subscriptions = append(c.subscriptions[:i], c.subscriptions[i+1:]...)
 			subsc.Unsubscribe()
 			return subsc.Id, nil
@@ -252,7 +256,7 @@ func (c *Client) Unsubscribe(channel *actioncable.ChannelIdentifier) (string, er
 func (c *Client) Send(channel *actioncable.ChannelIdentifier, message map[string]interface{}) (string, error) {
 	for _, subsc := range c.subscriptions {
 		if subsc.Identifier.Equals(channel) {
-			l.Debugf("[%v] Received message: %+v", c.id, message)
+			l.Debugf("[%v#%v] Received message: %+v", c.id, subsc.Id, message)
 			subsc.Send(message)
 			return subsc.Id, nil
 		}
