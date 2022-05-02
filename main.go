@@ -51,6 +51,9 @@ type Client struct {
 func setRequestOriginIfNotSet(r *http.Request) {
 	// Determine Origin header from Referer
 	if r.Header.Get("Origin") != "" || r.Header.Get("Referer") == "" {
+		if r.Header.Get("Origin") == "" {
+			l.Infof("Origin header missing and no Referrer: %+v", r.Header)
+		}
 		return
 	}
 
