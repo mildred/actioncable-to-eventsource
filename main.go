@@ -105,6 +105,7 @@ func NewClient(ctx0 context.Context, cableServer *url.URL, w http.ResponseWriter
 	}
 	headers.Set("Host", r.Host)
 	opt.SetHeader(&headers)
+	l.Debugf("Connect to ActionCable %s (Origin: %v)", cableServer, headers.Get("Origin"))
 	c.cable, err = actioncable.CreateConsumer(cableServer, opt)
 
 	if err != nil {
@@ -364,6 +365,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			var id string
 			l.Debugf("[%v] Request: %+v", r.RequestURI, req)
 			identifier, err := GetChanIdentifier(req.Identifier)
+			l.Debugf("[%v] client: %+v", r.RequestURI, client)
+			l.Debugf("[%v] identifier: %+v", r.RequestURI, identifier)
 			if err == nil && identifier != nil && req.Subscribe {
 				id, err = client.Subscribe(identifier)
 			} else if err == nil && identifier != nil && req.Unsubscribe {
