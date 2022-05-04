@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -18,6 +19,11 @@ import (
 
 	"github.com/potato2003/actioncable-client-go"
 	"github.com/segmentio/ksuid"
+)
+
+const (
+	QueueSize       = 32
+	SessionDuration = 5 * time.Minute
 )
 
 // export GOFLAGS="-ldflags=-X=main.version=$(git describe --always HEAD)"
@@ -41,6 +47,7 @@ type HttpError struct {
 
 type Client struct {
 	CableServer *url.URL
+	Handler     *Handler
 
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -50,6 +57,9 @@ type Client struct {
 	cable         *actioncable.Consumer
 	subscriptions []*Subscription
 	authHeaders   http.Header
+	events        chan *WsEvent
+	cleanCtx      context.Context
+	cleanCancel   context.CancelFunc
 }
 
 func setRequestOriginIfNotSet(id string, r *http.Request) {
@@ -81,16 +91,22 @@ func setRequestOriginIfNotSet(id string, r *http.Request) {
 	r.Header.Set("Origin", origin.String())
 }
 
-func NewClient(ctx0 context.Context, cableServer *url.URL, w http.ResponseWriter, r *http.Request) *Client {
+func (h *Handler) NewClient(ctx0 context.Context, cableServer *url.URL, w http.ResponseWriter, r *http.Request, queue int) *Client {
 	var err error
 	ctx, cancel := context.WithCancel(ctx0)
 	c := &Client{
+		Handler:     h,
 		CableServer: cableServer,
 		ctx:         ctx,
 		cancel:      cancel,
 		es:          NewBroker(),
-		id:          r.RequestURI,
+		id:          r.URL.Path,
 		authHeaders: http.Header{},
+		events:      nil,
+	}
+
+	if queue > 0 {
+		c.events = make(chan *WsEvent, queue)
 	}
 
 	setRequestOriginIfNotSet(c.id, r)
@@ -154,18 +170,21 @@ func (c *Client) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		if c.es.ConsumersCount() == 0 {
-			l.Debugf("[%v] Closed last connection to EventSource", r.RequestURI)
+			l.Debugf("[%v] Closed last connection to EventSource", r.URL.Path)
 			c.cancel()
 		} else {
-			l.Debugf("[%v] Closed connection to EventSource (still %d connected)", r.RequestURI, c.es.ConsumersCount())
+			l.Debugf("[%v] Closed connection to EventSource (still %d connected)", r.URL.Path, c.es.ConsumersCount())
 		}
 	}()
 
 	setRequestOriginIfNotSet(c.id, r)
-	for header := range c.authHeaders {
-		if r.Header.Get(header) != c.authHeaders.Get(header) {
-			w.WriteHeader(http.StatusForbidden)
-			return
+	if c.Handler.StrictHeaders {
+		for header := range c.authHeaders {
+			if r.Header.Get(header) != c.authHeaders.Get(header) {
+				l.Infof("[%v] Forbidden: mismatch header %s\n\texpected: %s\n\tactual:   %s", c.id, header, c.authHeaders.Get(header), r.Header.Get(header))
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
 		}
 	}
 
@@ -179,6 +198,66 @@ func (c *Client) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.es.SendEventMessage(string(data), "message", c.getID())
 	}()
 	c.es.ServeHTTP(w, r, cancel)
+}
+
+type LongPollResponse struct {
+	Message     *WsEvent `json:"message"`
+	QueueLength int      `json:"queue_length"`
+}
+
+func (c *Client) ServeHTTPSingleEvent(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	l.Debugf("[%v] Serve HTTP... (single event)", c.id)
+
+	setRequestOriginIfNotSet(c.id, r)
+	if c.Handler.StrictHeaders {
+		for header := range c.authHeaders {
+			if r.Header.Get(header) != c.authHeaders.Get(header) {
+				l.Infof("[%v] Forbidden: mismatch header %s\n\texpected: %s\n\tactual:   %s", c.id, header, c.authHeaders.Get(header), r.Header.Get(header))
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+		}
+	}
+
+	var res LongPollResponse
+
+	select {
+	case msg := <-c.events:
+		l.Infof("[%v] Dequeue long-poll event #%d in client=%p", c.id, len(c.events), c)
+		res.Message = msg
+	case <-ctx.Done():
+		l.Infof("[%v] Timeout long-poll in client=%p (queue=%d)", c.id, c, len(c.events))
+		break
+	}
+
+	res.QueueLength = len(c.events)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(res)
+
+	// Start the clean goroutine
+	go c.deferCleanup()
+}
+
+func (c *Client) deferCleanup() {
+	// Stop other clean goroutines if it exists
+	if c.cleanCancel != nil {
+		c.cleanCancel()
+	}
+
+	c.cleanCtx, c.cleanCancel = context.WithCancel(context.Background())
+	sessionCtx, sessionCtxCancel := context.WithTimeout(c.ctx, SessionDuration)
+	select {
+	case <-sessionCtx.Done():
+		// Cancel session
+		c.cancel()
+		c.cleanCancel()
+		sessionCtxCancel() // Just to make linter happy, context is dead
+	case <-c.cleanCtx.Done():
+		// Cleanup was cancelles before it could cancel the
+		// session. Cleanup the context and no nothing else
+		sessionCtxCancel()
+	}
 }
 
 func (c *Client) getID() string {
@@ -222,7 +301,12 @@ func (ch *ChanHandler) sendEvent(event *actioncable.SubscriptionEvent) {
 	if event.RawMessage != nil && len(*event.RawMessage) > 0 {
 		event.ReadJSON(&event.Message)
 	}
-	data, err := json.Marshal(WsEvent{ChanId: ch.id, Identifier: ch.channel, Type: event.Type, Message: event.Message})
+	ev := WsEvent{ChanId: ch.id, Identifier: ch.channel, Type: event.Type, Message: event.Message}
+	if ch.client.events != nil {
+		ch.client.events <- &ev
+		l.Infof("[%v] Post long-poll event #%d for %v in client=%p", ch.client.id, len(ch.client.events), ch.id, ch.client)
+	}
+	data, err := json.Marshal(ev)
 	if err != nil {
 		l.Infof("[%v#%v] Error sending event (ignoring): %v", ch.client.id, ch.id, err)
 	}
@@ -282,9 +366,10 @@ func (c *Client) Send(channel *actioncable.ChannelIdentifier, message map[string
 }
 
 type Handler struct {
-	lock        sync.Mutex
-	CableServer *url.URL
-	AllowReuse  bool
+	lock          sync.Mutex
+	CableServer   *url.URL
+	AllowReuse    bool
+	StrictHeaders bool
 
 	clients map[string]*Client
 }
@@ -294,9 +379,22 @@ func (h *Handler) GetClient(request_uri string) (*Client, bool) {
 	defer h.lock.Unlock()
 
 	client, ok := h.clients[request_uri]
-	if ok && client.ctx.Err() == nil {
-		delete(h.clients, request_uri)
+	return client, ok
+}
+
+func (h *Handler) GetClientOrCreate(request_uri string, ctx0 context.Context, cableServer *url.URL, w http.ResponseWriter, r *http.Request, queue int) (*Client, bool) {
+	h.lock.Lock()
+	defer h.lock.Unlock()
+
+	client, ok := h.clients[request_uri]
+
+	if !ok {
+		client = h.NewClient(ctx0, cableServer, w, r, queue)
+		if client != nil {
+			h.setClientUnsafe(request_uri, client)
+		}
 	}
+
 	return client, ok
 }
 
@@ -304,6 +402,10 @@ func (h *Handler) SetClient(request_uri string, client *Client) {
 	h.lock.Lock()
 	defer h.lock.Unlock()
 
+	h.setClientUnsafe(request_uri, client)
+}
+
+func (h *Handler) setClientUnsafe(request_uri string, client *Client) {
 	h.clients[request_uri] = client
 	go func() {
 		<-client.ctx.Done()
@@ -337,33 +439,64 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Cookie, Content-Type")
 
+	accept := r.Header.Get("Accept")
+
+	pollQueueStr := r.URL.Query().Get("poll-queue")
+	pollQueue, _ := strconv.ParseInt(pollQueueStr, 10, strconv.IntSize)
+	if pollQueue == 0 {
+		pollQueue = QueueSize
+	}
+
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
-	} else if r.Method == http.MethodGet {
-		client, ok := h.GetClient(r.RequestURI)
+	} else if r.Method == http.MethodGet && strings.HasPrefix(accept, "text/event-stream") {
+		client, ok := h.GetClient(r.URL.Path)
 		if ok {
 			if h.AllowReuse {
-				l.Debugf("[%v] Join existing EventSource", r.RequestURI)
+				l.Debugf("[%v] Join existing EventSource", r.URL.Path)
 				client.ServeHTTP(w, r)
 				// TODO: let the EventSource extend past the original connection context
 			} else {
 				w.WriteHeader(http.StatusForbidden)
-				fmt.Fprintf(w, "Access to EventSource forbidden")
+				fmt.Fprintf(w, "Access to EventSource forbidden (not allowing reuse)")
 				// Not that good but the client knows the EventSource is attached to someone else and it can send requests to it.
 				// Perhaps we should close the EventSource to prevent that.
 			}
 		} else {
-			l.Debugf("[%v] Creating EventSource", r.RequestURI)
+			l.Debugf("[%v] Creating EventSource", r.URL.Path)
 			var ctx context.Context
 			if h.AllowReuse {
 				ctx = context.Background()
 			} else {
 				ctx = r.Context()
 			}
-			client := NewClient(ctx, h.CableServer, w, r)
+			client := h.NewClient(ctx, h.CableServer, w, r, 0)
 			if client != nil {
-				h.SetClient(r.RequestURI, client)
+				h.SetClient(r.URL.Path, client)
 				client.ServeHTTP(w, r)
+			}
+		}
+	} else if r.Method == http.MethodGet {
+		ctx := r.Context()
+
+		timeoutStr := r.URL.Query().Get("timeout")
+		timeout, _ := strconv.ParseInt(timeoutStr, 10, strconv.IntSize)
+		if timeout >= 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+			defer cancel()
+		}
+
+		client, ok := h.GetClientOrCreate(r.URL.Path, context.Background(), h.CableServer, w, r, int(pollQueue))
+		if ok {
+			l.Debugf("[%v] Join existing EventSource", r.URL.Path)
+			client.ServeHTTPSingleEvent(ctx, w, r)
+		} else {
+			l.Debugf("[%v] Creating EventSource", r.URL.Path)
+			// Start client in background, it is cancelled by
+			// client.ServeHTTPSingleEvent below
+			if client != nil {
+				client.ServeHTTPSingleEvent(ctx, w, r)
 			}
 		}
 	} else if r.Method == http.MethodPost {
@@ -377,20 +510,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "Error decoding request: %v", err)
 		}
 
-		client, ok := h.clients[r.RequestURI]
+		client, ok := h.clients[r.URL.Path]
 		if !ok || client == nil {
-			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprintf(w, "EventSource channel does not exists: %v", r.RequestURI)
+			if pollQueueStr != "" {
+				l.Debugf("[%v] Creating EventSource", r.URL.Path)
+				client = h.NewClient(context.Background(), h.CableServer, w, r, int(pollQueue))
+				h.SetClient(r.URL.Path, client)
+				go client.deferCleanup()
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+				fmt.Fprintf(w, "EventSource channel does not exists: %v", r.URL.Path)
+			}
 		}
 
 		var responses []Response
 
 		for _, req := range requests {
 			var id string
-			l.Debugf("[%v] Request: %+v", r.RequestURI, req)
+			l.Debugf("[%v] Request: %+v", r.URL.Path, req)
 			identifier, err := GetChanIdentifier(req.Identifier)
-			l.Debugf("[%v] client: %+v", r.RequestURI, client)
-			l.Debugf("[%v] identifier: %+v", r.RequestURI, identifier)
+			l.Debugf("[%v] client: %+v", r.URL.Path, client)
+			l.Debugf("[%v] identifier: %+v", r.URL.Path, identifier)
 			if err == nil && identifier != nil && req.Subscribe {
 				id, err = client.Subscribe(identifier)
 			} else if err == nil && identifier != nil && req.Unsubscribe {
@@ -427,6 +567,7 @@ func serve(ctx context.Context) error {
 	flag.BoolVar(&handler.AllowReuse, "r", false, "Allow reusing EventSource")
 	flag.BoolVar(&l.DebugLevel, "d", false, "Debug log")
 	flag.BoolVar(&quiet, "q", false, "Quiet log")
+	flag.BoolVar(&handler.StrictHeaders, "strict-headers", false, "Enforce same headers between requests")
 	flag.StringVar(&cable_url, "s", "ws://127.0.0.1:3000/cable", "ActionCable URL")
 
 	versionFlag := flag.Bool("version", false, "Show version")

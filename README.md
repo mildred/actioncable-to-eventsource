@@ -17,8 +17,9 @@ on `http://localhost:8080` (the default) it should Generate an URL of the form
 Note that CORS headers are automatically set and any cookie passed will be
 forwarded to the WebSocket server.
 
-- GET `http://{host}/{events-id}`: Starts an EventSource session. The `message`
-  event will be passed all the messages of the session.
+- GET `http://{host}/{events-id}` with `Accept: text/event-stream`: Starts an
+  EventSource session. The `message` event will be passed all the messages of
+  the session.
 
   A command-line setting can allow multiple listeners to the same EventSource
   session.
@@ -89,6 +90,35 @@ forwarded to the WebSocket server.
           "error":   optional error,
           "chan_id": a unique identifier for the ActionCable channel (maps to the identifier) 
         }
+
+
+Long-polling API
+----------------
+
+The service can work also with long polling in case EventSource is not working.
+
+- GET `http://{host}/{events-id}` with `Accept: application/json`: Starts or
+  continues a long polling session.
+
+  Query-string parameters:
+
+    - `timeout` (default `25`): force the server to reploy within the given
+      number of seconds. Set to `0` to disable.
+
+  The response is a JSON object in the form of:
+
+        {
+          "message": null,
+        }
+
+  The `message` property correspond to the messages defined in the EventSource
+  API above. If there is no message (in case of timeout), it is `null`.
+
+  The session is kept on the server for a minimum of 30 seconds after the
+  response. The client has that time to issue another identical request to get
+  the next message.
+
+- GET `http://{host}/{events-id}` identical as EventStream API.
 
 Deployment
 ----------
