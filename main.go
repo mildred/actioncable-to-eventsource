@@ -581,6 +581,8 @@ func serve(ctx context.Context) error {
 
 	l.InfoLevel = !quiet
 
+	l.Infof("Starting actioncable-to-eventsource version %s (build %s at %s)", version, commit, date)
+
 	handler.CableServer, err = url.Parse(cable_url)
 	if err != nil {
 		return fmt.Errorf("failed to parse ActionCable server URL, %v", err)
