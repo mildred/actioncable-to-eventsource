@@ -333,6 +333,11 @@ func (ch *ChanHandler) OnReceived(event *actioncable.SubscriptionEvent) {
 	ch.sendEvent(event)
 }
 
+func (ch *ChanHandler) OnError(err error) {
+	l.Debugf("[%v#%v] error: %v", ch.client.id, ch.id, err)
+	panic(err)
+}
+
 func (c *Client) Subscribe(channel *actioncable.ChannelIdentifier) (string, error) {
 	id := ksuid.New().String()
 	l.Debugf("[%v#%v] Subscribe: %+v", c.id, id, channel)

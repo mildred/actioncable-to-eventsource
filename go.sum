@@ -14,6 +14,8 @@ github.com/mildred/actioncable-client-go v0.0.0-20220413160948-c5b76733423f h1:T
 github.com/mildred/actioncable-client-go v0.0.0-20220413160948-c5b76733423f/go.mod h1:BguHkbH8ti3MvtZX2hAtyZTYeeqRZvCBZxWr0RpcLrI=
 github.com/mildred/actioncable-client-go v0.0.0-20220502140028-877adb02fdfc h1:1GdUc1AY0L8C5Y0HbKXM/zhVPpj3yxzmrd5oXPYitnU=
 github.com/mildred/actioncable-client-go v0.0.0-20220502140028-877adb02fdfc/go.mod h1:BguHkbH8ti3MvtZX2hAtyZTYeeqRZvCBZxWr0RpcLrI=
+github.com/mildred/actioncable-client-go v0.0.0-20220824160057-a8880925508f h1:4eT83oqez1+57lnMR6qunv/Jmrj9moZ+rXOndhPFC5s=
+github.com/mildred/actioncable-client-go v0.0.0-20220824160057-a8880925508f/go.mod h1:BguHkbH8ti3MvtZX2hAtyZTYeeqRZvCBZxWr0RpcLrI=
 github.com/potato2003/actioncable-client-go v0.0.0-20200530121345-f064d751d145 h1:hH1tlm2bp34AqA4Vosyx3oP3ppckBofTWH61ZK2CWJM=
 github.com/potato2003/actioncable-client-go v0.0.0-20200530121345-f064d751d145/go.mod h1:oyKk/WKllybI/RmWLDmorVQprmZhx+cNbpkccweFmY0=
 github.com/segmentio/ksuid v1.0.4 h1:sBo2BdShXjmcugAMwjugoGUdUV0pcxY5mW4xKRn3v4c=
