@@ -39,6 +39,7 @@ jobs:
       - name: Construct release name
         id: vars
         run: |
+          git tag | grep -- -latest- | xargs -n 1 git tag -d
           lastver=$(git describe --tags --abbrev=0 HEAD 2>/dev/null || echo v0.0.0)
           lastver=${lastver%%-*}
           echo ::set-output name=last_ver::$lastver
@@ -48,7 +49,7 @@ jobs:
           else
             echo ::set-output name=prerelease::true
             echo ::set-output name=release_name::${lastver}-latest-${GITHUB_REF#refs/*/}
-            git push origin +HEAD:refs/tags/${lastver}-latest-${GITHUB_REF#refs/*/}
+            git push origin +HEAD:refs/heads/${lastver}-latest-${GITHUB_REF#refs/*/}
           fi
 
       - name: Release
