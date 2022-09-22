@@ -62,11 +62,12 @@ forwarded to the WebSocket server.
               "unsubscribe": true
             }
 
-      - Send requests: send a message to an ActionCable channel
+      - Send requests: send a message to an ActionCable channel (action key is
+        the method invoked on the server side)
 
             {
               "identifier": {"channel": "...", ...},
-              "send":       {...}
+              "send":       {"action": "...", ...}
             }
 
     Note that the actual request body is an array of these requests, for
