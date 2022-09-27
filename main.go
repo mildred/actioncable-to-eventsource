@@ -520,11 +520,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if pollQueueStr != "" {
 				l.Debugf("[%v] Creating EventSource", r.URL.Path)
 				client = h.NewClient(context.Background(), h.CableServer, w, r, int(pollQueue))
-				h.SetClient(r.URL.Path, client)
-				go client.deferCleanup()
+				if client != nil {
+					h.SetClient(r.URL.Path, client)
+					go client.deferCleanup()
+				} else {
+					l.Errorf("[%v] failed to create client", r.URL.Path)
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
 			} else {
 				w.WriteHeader(http.StatusNotFound)
 				fmt.Fprintf(w, "EventSource channel does not exists: %v", r.URL.Path)
+				return
 			}
 		}
 
