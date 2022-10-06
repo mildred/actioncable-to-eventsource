@@ -84,7 +84,7 @@ func NewBroker() *Broker {
 	return &Broker{subscribers: make(map[chan Event]bool)}
 }
 
-func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request, cancel context.CancelFunc) {
+func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request, cancel context.CancelFunc, sessionId string) {
 	ctx := r.Context()
 	f, ok := w.(http.Flusher)
 	if !ok {

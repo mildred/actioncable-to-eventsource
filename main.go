@@ -49,6 +49,7 @@ type Client struct {
 	CableServer *url.URL
 	Handler     *Handler
 
+	sessionId     string
 	ctx           context.Context
 	cancel        context.CancelFunc
 	id            string
@@ -58,6 +59,8 @@ type Client struct {
 	subscriptions []*Subscription
 	authHeaders   http.Header
 	events        chan *WsEvent
+	eventsLock    sync.Mutex
+	eventsDropped int
 	cleanCtx      context.Context
 	cleanCancel   context.CancelFunc
 }
@@ -95,14 +98,17 @@ func (h *Handler) NewClient(ctx0 context.Context, cableServer *url.URL, w http.R
 	var err error
 	ctx, cancel := context.WithCancel(ctx0)
 	c := &Client{
-		Handler:     h,
-		CableServer: cableServer,
-		ctx:         ctx,
-		cancel:      cancel,
-		es:          NewBroker(),
-		id:          r.URL.Path,
-		authHeaders: http.Header{},
-		events:      nil,
+		Handler:       h,
+		CableServer:   cableServer,
+		ctx:           ctx,
+		cancel:        cancel,
+		es:            NewBroker(),
+		id:            r.URL.Path,
+		authHeaders:   http.Header{},
+		events:        nil,
+		eventsLock:    sync.Mutex{},
+		eventsDropped: 0,
+		sessionId:     ksuid.New().String(),
 	}
 
 	if queue > 0 {
@@ -168,6 +174,8 @@ type MetaEvent struct {
 func (c *Client) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	l.Debugf("[%v] Serve HTTP...", c.id)
 
+	w.Header().Set("X-Session-Id", c.sessionId)
+
 	defer func() {
 		if c.es.ConsumersCount() == 0 {
 			l.Debugf("[%v] Closed last connection to EventSource", r.URL.Path)
@@ -197,16 +205,18 @@ func (c *Client) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		c.es.SendEventMessage(string(data), "message", c.getID())
 	}()
-	c.es.ServeHTTP(w, r, cancel)
+	c.es.ServeHTTP(w, r, cancel, c.sessionId)
 }
 
 type LongPollResponse struct {
-	Message     *WsEvent `json:"message"`
-	QueueLength int      `json:"queue_length"`
+	Messages    []*WsEvent `json:"messages"`
+	Dropped     int        `json:"dropped"`
+	SessionId   string     `json:"session_id"`
+	QueueLength int        `json:"queue_length"`
 }
 
-func (c *Client) ServeHTTPSingleEvent(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-	l.Debugf("[%v] Serve HTTP... (single event)", c.id)
+func (c *Client) ServeHTTPAvailableEvents(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	l.Debugf("[%v] Serve HTTP... (available events)", c.id)
 
 	setRequestOriginIfNotSet(c.id, r)
 	if c.Handler.StrictHeaders {
@@ -221,16 +231,29 @@ func (c *Client) ServeHTTPSingleEvent(ctx context.Context, w http.ResponseWriter
 
 	var res LongPollResponse
 
+	Loop:
+	for {
+		select {
+		case msg := <-c.events:
+			l.Infof("[%v] Dequeue long-poll event #%d in client=%p", c.id, len(c.events), c)
+			res.Messages = append(res.Messages, msg)
+		default:
+			break Loop
+		}
+	}
+
 	select {
 	case msg := <-c.events:
 		l.Infof("[%v] Dequeue long-poll event #%d in client=%p", c.id, len(c.events), c)
-		res.Message = msg
+		res.Messages = append(res.Messages, msg)
 	case <-ctx.Done():
 		l.Infof("[%v] Timeout long-poll in client=%p (queue=%d)", c.id, c, len(c.events))
 		break
 	}
 
 	res.QueueLength = len(c.events)
+	res.SessionId = c.sessionId
+	res.Dropped = c.getDropped()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
@@ -265,6 +288,33 @@ func (c *Client) getID() string {
 	return fmt.Sprintf("%d", c.lastId)
 }
 
+func (c *Client) getDropped() int {
+	c.eventsLock.Lock()
+	defer c.eventsLock.Unlock()
+
+	dropped := c.eventsDropped
+	c.eventsDropped = 0
+	return dropped
+}
+
+func (c *Client) enqueue(ch_id string, ev *WsEvent) {
+	if c.events == nil {
+		return
+	}
+
+	c.eventsLock.Lock()
+	defer c.eventsLock.Unlock()
+
+	if len(c.events) == cap(c.events) {
+		l.Infof("[%v] event queue is full (%d) for %v in client=%p: dropping first message", c.id, len(c.events), ch_id, c)
+		<- c.events
+		c.eventsDropped = c.eventsDropped + 1
+	}
+
+	l.Infof("[%v] Post long-poll event #%d/%d for %v in client=%p", c.id, len(c.events)+1, cap(c.events), ch_id, c)
+	c.events <- ev
+}
+
 type ChanIdentifier map[string]interface{}
 
 func GetChanIdentifier(id ChanIdentifier) (*actioncable.ChannelIdentifier, error) {
@@ -288,9 +338,12 @@ type ChanHandler struct {
 }
 
 type WsEvent struct {
+	SessionId  string                            `json:"session_id,omitempty"`
 	ChanId     string                            `json:"chan_id"`
+	MsgId      string                            `json:"msg_id"`
 	Identifier *actioncable.ChannelIdentifier    `json:"identifier"`
 	Type       actioncable.SubscriptionEventType `json:"type"`
+	Time       string                            `json:"time"`
 	Message    interface{}                       `json:"message"`
 }
 
@@ -301,11 +354,18 @@ func (ch *ChanHandler) sendEvent(event *actioncable.SubscriptionEvent) {
 	if event.RawMessage != nil && len(*event.RawMessage) > 0 {
 		event.ReadJSON(&event.Message)
 	}
-	ev := WsEvent{ChanId: ch.id, Identifier: ch.channel, Type: event.Type, Message: event.Message}
-	if ch.client.events != nil {
-		ch.client.events <- &ev
-		l.Infof("[%v] Post long-poll event #%d for %v in client=%p", ch.client.id, len(ch.client.events), ch.id, ch.client)
+	ev := WsEvent{
+		ChanId: ch.id,
+		MsgId: id,
+		Identifier: ch.channel,
+		Type: event.Type,
+		Time: time.Now().Format(time.RFC3339Nano),
+		Message: event.Message,
 	}
+
+	ch.client.enqueue(ch.id, &ev)
+
+	ev.SessionId = ch.client.sessionId
 	data, err := json.Marshal(ev)
 	if err != nil {
 		l.Infof("[%v#%v] Error sending event (ignoring): %v", ch.client.id, ch.id, err)
@@ -434,8 +494,9 @@ type Request struct {
 }
 
 type Response struct {
-	ChanId string `json:"chan_id"`
-	Error  error  `json:"error"`
+	ChanId    string `json:"chan_id"`
+	SessionId string `json:"session_id"`
+	Error     error  `json:"error"`
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -486,7 +547,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		timeoutStr := r.URL.Query().Get("timeout")
 		timeout, _ := strconv.ParseInt(timeoutStr, 10, strconv.IntSize)
-		if timeout >= 0 {
+		if timeout == 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithCancel(ctx)
+			cancel()
+		} else if timeout > 0 {
 			var cancel context.CancelFunc
 			ctx, cancel = context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 			defer cancel()
@@ -495,13 +560,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		client, ok := h.GetClientOrCreate(r.URL.Path, context.Background(), h.CableServer, w, r, int(pollQueue))
 		if ok {
 			l.Debugf("[%v] Join existing EventSource", r.URL.Path)
-			client.ServeHTTPSingleEvent(ctx, w, r)
+			client.ServeHTTPAvailableEvents(ctx, w, r)
 		} else {
 			l.Debugf("[%v] Creating EventSource", r.URL.Path)
 			// Start client in background, it is cancelled by
-			// client.ServeHTTPSingleEvent below
+			// client.ServeHTTPAvailableEvents below
 			if client != nil {
-				client.ServeHTTPSingleEvent(ctx, w, r)
+				client.ServeHTTPAvailableEvents(ctx, w, r)
 			}
 		}
 	} else if r.Method == http.MethodPost {
@@ -552,7 +617,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			} else if err == nil {
 				err = fmt.Errorf("Unknown request")
 			}
-			responses = append(responses, Response{ChanId: id, Error: err})
+			responses = append(responses, Response{ChanId: id, Error: err, SessionId: client.sessionId})
 		}
 
 		enc := json.NewEncoder(w)

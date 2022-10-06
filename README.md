@@ -38,15 +38,23 @@ forwarded to the WebSocket server.
 
             {
                 "type":       "connected" | "disconnected" | "rejected" | "received",
+                "session_id": the session identifier (omitted in long-poll as this is redundant)
                 "chan_id":    a unique identifier for the ActionCable channel (maps to the identifier)
+                "msg_id":     a unique id of the message
+                "time":       message timestamp
                 "identifier": the ActionCable identifier {"channel": "", ...}
                 "message":    {...}
             }
 
 - POST `http://{host}/{events-id}`: Manipulates the EventSource session with
   requests, allowing to connect to ActionCable channels. The request body must
-  be a JSON array containing one or more requests. A request is a JSON object in
-  the form of:
+  be a JSON array containing one or more requests.
+
+  Query String parameters:
+
+    - `poll-queue` (default `32`): sets the queue size
+
+  A request is a JSON object in the form of:
 
       - Subscribe requests: subscribe to an ActionCable channel
 
@@ -88,8 +96,9 @@ forwarded to the WebSocket server.
     individual response is of the form:
 
         {
-          "error":   optional error,
-          "chan_id": a unique identifier for the ActionCable channel (maps to the identifier) 
+          "error":      optional error,
+          "session_id": session identifier
+          "chan_id":    a unique identifier for the ActionCable channel (maps to the identifier) 
         }
 
 
@@ -106,14 +115,23 @@ The service can work also with long polling in case EventSource is not working.
     - `timeout` (default `25`): force the server to reploy within the given
       number of seconds. Set to `0` to disable.
 
+    - `poll-queue` (default `32`): sets the queue size
+
   The response is a JSON object in the form of:
 
         {
-          "message": null,
+          "messages": [],
+          "session_id": "",
+          "dropped": 0,
+          "queue_length": 0
         }
 
-  The `message` property correspond to the messages defined in the EventSource
-  API above. If there is no message (in case of timeout), it is `null`.
+  The `messages` property correspond to the messages defined in the EventSource
+  API above. If there is no message (in case of timeout), it is empty. The
+  `queue_length` is the number of message left in queue and `dropped` is the
+  number of messages dropped since last query because of a full queue.
+  `session_id` can be used to check that the background channel has not been
+  restarted.
 
   The session is kept on the server for a minimum of 30 seconds after the
   response. The client has that time to issue another identical request to get
