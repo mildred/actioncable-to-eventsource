@@ -213,6 +213,7 @@ type LongPollResponse struct {
 	Dropped     int        `json:"dropped"`
 	SessionId   string     `json:"session_id"`
 	QueueLength int        `json:"queue_length"`
+	Channels    []string   `json:"channels"`
 }
 
 func (c *Client) ServeHTTPAvailableEvents(ctx context.Context, w http.ResponseWriter, r *http.Request) {
@@ -230,6 +231,12 @@ func (c *Client) ServeHTTPAvailableEvents(ctx context.Context, w http.ResponseWr
 	}
 
 	var res LongPollResponse
+	res.Messages = []*WsEvent{}
+	res.Channels = []string{}
+	res.SessionId = c.sessionId
+	for _, subsc := range c.subscriptions {
+		res.Channels = append(res.Channels, subsc.Id)
+	}
 
 	Loop:
 	for {
@@ -252,7 +259,6 @@ func (c *Client) ServeHTTPAvailableEvents(ctx context.Context, w http.ResponseWr
 	}
 
 	res.QueueLength = len(c.events)
-	res.SessionId = c.sessionId
 	res.Dropped = c.getDropped()
 
 	w.Header().Set("Content-Type", "application/json")
