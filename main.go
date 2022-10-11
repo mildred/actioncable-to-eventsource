@@ -22,8 +22,7 @@ import (
 )
 
 const (
-	QueueSize       = 32
-	SessionDuration = 5 * time.Minute
+	QueueSize = 32
 )
 
 // export GOFLAGS="-ldflags=-X=main.version=$(git describe --always HEAD)"
@@ -49,20 +48,21 @@ type Client struct {
 	CableServer *url.URL
 	Handler     *Handler
 
-	sessionId     string
-	ctx           context.Context
-	cancel        context.CancelFunc
-	id            string
-	lastId        int
-	es            *Broker
-	cable         *actioncable.Consumer
-	subscriptions []*Subscription
-	authHeaders   http.Header
-	events        chan *WsEvent
-	eventsLock    sync.Mutex
-	eventsDropped int
-	cleanCtx      context.Context
-	cleanCancel   context.CancelFunc
+	sessionId       string
+	sessionDuration time.Duration
+	ctx             context.Context
+	cancel          context.CancelFunc
+	id              string
+	lastId          int
+	es              *Broker
+	cable           *actioncable.Consumer
+	subscriptions   []*Subscription
+	authHeaders     http.Header
+	events          chan *WsEvent
+	eventsLock      sync.Mutex
+	eventsDropped   int
+	cleanCtx        context.Context
+	cleanCancel     context.CancelFunc
 }
 
 func setRequestOriginIfNotSet(id string, r *http.Request) {
@@ -94,22 +94,25 @@ func setRequestOriginIfNotSet(id string, r *http.Request) {
 	r.Header.Set("Origin", origin.String())
 }
 
-func (h *Handler) NewClient(ctx0 context.Context, cableServer *url.URL, w http.ResponseWriter, r *http.Request, queue int) *Client {
+func (h *Handler) NewClient(ctx0 context.Context, cableServer *url.URL, w http.ResponseWriter, r *http.Request, queue int, sessionDuration time.Duration) *Client {
 	var err error
 	ctx, cancel := context.WithCancel(ctx0)
 	c := &Client{
-		Handler:       h,
-		CableServer:   cableServer,
-		ctx:           ctx,
-		cancel:        cancel,
-		es:            NewBroker(),
-		id:            r.URL.Path,
-		authHeaders:   http.Header{},
-		events:        nil,
-		eventsLock:    sync.Mutex{},
-		eventsDropped: 0,
-		sessionId:     ksuid.New().String(),
+		Handler:         h,
+		CableServer:     cableServer,
+		ctx:             ctx,
+		cancel:          cancel,
+		es:              NewBroker(),
+		id:              r.URL.Path,
+		authHeaders:     http.Header{},
+		events:          nil,
+		eventsLock:      sync.Mutex{},
+		eventsDropped:   0,
+		sessionId:       ksuid.New().String(),
+		sessionDuration: sessionDuration,
 	}
+
+	l.Infof("[%v] Session %s started", c.id, c.sessionId)
 
 	if queue > 0 {
 		c.events = make(chan *WsEvent, queue)
@@ -265,25 +268,28 @@ func (c *Client) ServeHTTPAvailableEvents(ctx context.Context, w http.ResponseWr
 	json.NewEncoder(w).Encode(res)
 
 	// Start the clean goroutine
-	go c.deferCleanup()
+	go c.deferCleanup(0)
 }
 
-func (c *Client) deferCleanup() {
+func (c *Client) deferCleanup(d time.Duration) {
 	// Stop other clean goroutines if it exists
 	if c.cleanCancel != nil {
 		c.cleanCancel()
 	}
 
+	l.Infof("[%v] Session %s still valid for %v", c.id, c.sessionId, c.sessionDuration + d)
+
 	c.cleanCtx, c.cleanCancel = context.WithCancel(context.Background())
-	sessionCtx, sessionCtxCancel := context.WithTimeout(c.ctx, SessionDuration)
+	sessionCtx, sessionCtxCancel := context.WithTimeout(c.ctx, c.sessionDuration + d)
 	select {
 	case <-sessionCtx.Done():
 		// Cancel session
+		l.Infof("[%v] Session %s timeouted %v", c.id, c.sessionId, c.sessionDuration + d)
 		c.cancel()
 		c.cleanCancel()
 		sessionCtxCancel() // Just to make linter happy, context is dead
 	case <-c.cleanCtx.Done():
-		// Cleanup was cancelles before it could cancel the
+		// Cleanup was cancelled before it could cancel the
 		// session. Cleanup the context and no nothing else
 		sessionCtxCancel()
 	}
@@ -437,10 +443,11 @@ func (c *Client) Send(channel *actioncable.ChannelIdentifier, message map[string
 }
 
 type Handler struct {
-	lock          sync.Mutex
-	CableServer   *url.URL
-	AllowReuse    bool
-	StrictHeaders bool
+	lock            sync.Mutex
+	CableServer     *url.URL
+	AllowReuse      bool
+	StrictHeaders   bool
+	sessionDuration time.Duration
 
 	clients map[string]*Client
 }
@@ -460,7 +467,7 @@ func (h *Handler) GetClientOrCreate(request_uri string, ctx0 context.Context, ca
 	client, ok := h.clients[request_uri]
 
 	if !ok {
-		client = h.NewClient(ctx0, cableServer, w, r, queue)
+		client = h.NewClient(ctx0, cableServer, w, r, queue, h.sessionDuration)
 		if client != nil {
 			h.setClientUnsafe(request_uri, client)
 		}
@@ -542,7 +549,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			} else {
 				ctx = r.Context()
 			}
-			client := h.NewClient(ctx, h.CableServer, w, r, 0)
+			client := h.NewClient(ctx, h.CableServer, w, r, 0, h.sessionDuration)
 			if client != nil {
 				h.SetClient(r.URL.Path, client)
 				client.ServeHTTP(w, r)
@@ -552,26 +559,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
 		timeoutStr := r.URL.Query().Get("timeout")
-		timeout, _ := strconv.ParseInt(timeoutStr, 10, strconv.IntSize)
+		timeoutInt, _ := strconv.ParseInt(timeoutStr, 10, strconv.IntSize)
+		timeout := time.Duration(timeoutInt)*time.Second
 		if timeout == 0 {
 			var cancel context.CancelFunc
 			ctx, cancel = context.WithCancel(ctx)
 			cancel()
 		} else if timeout > 0 {
 			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+			ctx, cancel = context.WithTimeout(ctx, timeout)
 			defer cancel()
 		}
+
+
 
 		client, ok := h.GetClientOrCreate(r.URL.Path, context.Background(), h.CableServer, w, r, int(pollQueue))
 		if ok {
 			l.Debugf("[%v] Join existing EventSource", r.URL.Path)
+			go client.deferCleanup(timeout)
 			client.ServeHTTPAvailableEvents(ctx, w, r)
 		} else {
 			l.Debugf("[%v] Creating EventSource", r.URL.Path)
 			// Start client in background, it is cancelled by
 			// client.ServeHTTPAvailableEvents below
 			if client != nil {
+				go client.deferCleanup(timeout)
 				client.ServeHTTPAvailableEvents(ctx, w, r)
 			}
 		}
@@ -590,10 +602,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !ok || client == nil {
 			if pollQueueStr != "" {
 				l.Debugf("[%v] Creating EventSource", r.URL.Path)
-				client = h.NewClient(context.Background(), h.CableServer, w, r, int(pollQueue))
+				client = h.NewClient(context.Background(), h.CableServer, w, r, int(pollQueue), h.sessionDuration)
 				if client != nil {
 					h.SetClient(r.URL.Path, client)
-					go client.deferCleanup()
+					go client.deferCleanup(0)
 				} else {
 					l.Errorf("[%v] failed to create client", r.URL.Path)
 					w.WriteHeader(http.StatusInternalServerError)
@@ -652,6 +664,7 @@ func serve(ctx context.Context) error {
 	flag.BoolVar(&quiet, "q", false, "Quiet log")
 	flag.BoolVar(&handler.StrictHeaders, "strict-headers", false, "Enforce same headers between requests")
 	flag.StringVar(&cable_url, "s", "ws://127.0.0.1:3000/cable", "ActionCable URL")
+	flag.DurationVar(&handler.sessionDuration, "S", 5 * time.Minute, "Session duration")
 
 	versionFlag := flag.Bool("version", false, "Show version")
 	flag.Parse()
