@@ -460,20 +460,24 @@ func (h *Handler) GetClient(request_uri string) (*Client, bool) {
 	return client, ok
 }
 
-func (h *Handler) GetClientOrCreate(request_uri string, ctx0 context.Context, cableServer *url.URL, w http.ResponseWriter, r *http.Request, queue int) (*Client, bool) {
+func (h *Handler) GetClientOrCreate(request_uri string, create bool, ctx0 context.Context, cableServer *url.URL, w http.ResponseWriter, r *http.Request, queue int) (*Client, bool) {
 	h.lock.Lock()
 	defer h.lock.Unlock()
 
 	client, ok := h.clients[request_uri]
 
-	if !ok {
-		client = h.NewClient(ctx0, cableServer, w, r, queue, h.sessionDuration)
-		if client != nil {
-			h.setClientUnsafe(request_uri, client)
+	if !ok || client == nil {
+		if create {
+			l.Debugf("[%v] Creating EventSource", request_uri)
+			client = h.NewClient(ctx0, cableServer, w, r, queue, h.sessionDuration)
+			if client != nil {
+				h.setClientUnsafe(request_uri, client)
+			}
 		}
+		return client, create
+	} else {
+		return client, false
 	}
-
-	return client, ok
 }
 
 func (h *Handler) SetClient(request_uri string, client *Client) {
@@ -528,33 +532,36 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
+
 	} else if r.Method == http.MethodGet && strings.HasPrefix(accept, "text/event-stream") {
-		client, ok := h.GetClient(r.URL.Path)
-		if ok {
-			if h.AllowReuse {
-				l.Debugf("[%v] Join existing EventSource", r.URL.Path)
-				client.ServeHTTP(w, r)
-				// TODO: let the EventSource extend past the original connection context
-			} else {
-				w.WriteHeader(http.StatusForbidden)
-				fmt.Fprintf(w, "Access to EventSource forbidden (not allowing reuse)")
-				// Not that good but the client knows the EventSource is attached to someone else and it can send requests to it.
-				// Perhaps we should close the EventSource to prevent that.
-			}
+		var ctx context.Context
+		if h.AllowReuse {
+			ctx = context.Background()
 		} else {
-			l.Debugf("[%v] Creating EventSource", r.URL.Path)
-			var ctx context.Context
-			if h.AllowReuse {
-				ctx = context.Background()
-			} else {
-				ctx = r.Context()
-			}
-			client := h.NewClient(ctx, h.CableServer, w, r, 0, h.sessionDuration)
-			if client != nil {
-				h.SetClient(r.URL.Path, client)
-				client.ServeHTTP(w, r)
-			}
+			ctx = r.Context()
 		}
+
+		client, created := h.GetClientOrCreate(r.URL.Path, true, ctx, h.CableServer, w, r, 0)
+
+		if client == nil {
+			return // NewClient already pushes the error message
+		}
+
+		if !created && !h.AllowReuse {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprintf(w, "Access to EventSource forbidden (not allowing reuse)")
+			// Not that good but the client knows the EventSource is attached to someone else and it can send requests to it.
+			// Perhaps we should close the EventSource to prevent that.
+			return
+		}
+
+		if ! created {
+			l.Debugf("[%v] Join existing EventSource", r.URL.Path)
+			// TODO: let the EventSource extend past the original connection context
+		}
+
+		client.ServeHTTP(w, r)
+
 	} else if r.Method == http.MethodGet {
 		ctx := r.Context()
 
@@ -571,22 +578,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			defer cancel()
 		}
 
+		client, created := h.GetClientOrCreate(r.URL.Path, true, context.Background(), h.CableServer, w, r, int(pollQueue))
 
-
-		client, ok := h.GetClientOrCreate(r.URL.Path, context.Background(), h.CableServer, w, r, int(pollQueue))
-		if ok {
-			l.Debugf("[%v] Join existing EventSource", r.URL.Path)
-			go client.deferCleanup(timeout)
-			client.ServeHTTPAvailableEvents(ctx, w, r)
-		} else {
-			l.Debugf("[%v] Creating EventSource", r.URL.Path)
-			// Start client in background, it is cancelled by
-			// client.ServeHTTPAvailableEvents below
-			if client != nil {
-				go client.deferCleanup(timeout)
-				client.ServeHTTPAvailableEvents(ctx, w, r)
-			}
+		if client == nil {
+			return // NewClient already pushes the error message
 		}
+
+		if ! created {
+			l.Debugf("[%v] Join existing EventSource", r.URL.Path)
+		}
+
+		go client.deferCleanup(timeout)
+		client.ServeHTTPAvailableEvents(ctx, w, r)
 	} else if r.Method == http.MethodPost {
 		var requests []Request
 
@@ -598,24 +601,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "Error decoding request: %v", err)
 		}
 
-		client, ok := h.clients[r.URL.Path]
-		if !ok || client == nil {
-			if pollQueueStr != "" {
-				l.Debugf("[%v] Creating EventSource", r.URL.Path)
-				client = h.NewClient(context.Background(), h.CableServer, w, r, int(pollQueue), h.sessionDuration)
-				if client != nil {
-					h.SetClient(r.URL.Path, client)
-					go client.deferCleanup(0)
-				} else {
-					l.Errorf("[%v] failed to create client", r.URL.Path)
-					w.WriteHeader(http.StatusInternalServerError)
-					return
-				}
-			} else {
-				w.WriteHeader(http.StatusNotFound)
-				fmt.Fprintf(w, "EventSource channel does not exists: %v", r.URL.Path)
-				return
-			}
+		client, created := h.GetClientOrCreate(r.URL.Path, pollQueueStr != "", context.Background(), h.CableServer, w, r, int(pollQueue))
+
+		if created && client == nil {
+			return // NewClient already pushes the error message
+		}
+
+		if ! created && client == nil {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprintf(w, "EventSource channel does not exists: %v", r.URL.Path)
+			return
+		}
+
+		if created {
+			go client.deferCleanup(0)
 		}
 
 		var responses []Response
