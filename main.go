@@ -419,22 +419,25 @@ func (c *Client) Subscribe(channel *actioncable.ChannelIdentifier) (string, erro
 	defer c.subscriptionsLock.Unlock()
 
 	for _, subsc := range c.subscriptions {
-		if subsc.Identifier.Equals(channel) {
+		if subsc.Subscription != nil && subsc.Identifier.Equals(channel) {
 			return subsc.Id, nil
 		}
 	}
 
 	id := ksuid.New().String()
+	subscription := &Subscription{nil, id}
+	c.subscriptions = append(c.subscriptions, subscription)
+
 	l.Debugf("[%v#%v] Subscribe: %+v", c.id, id, channel)
 	subsc, err := c.cable.Subscriptions.Create(channel)
 	subsc.SetHandler(&ChanHandler{c, channel, id})
-	c.subscriptions = append(c.subscriptions, &Subscription{subsc, id})
+	subscription.Subscription = subsc
 	return id, err
 }
 
 func (c *Client) Unsubscribe(channel *actioncable.ChannelIdentifier) (string, error) {
 	for i, subsc := range c.subscriptions {
-		if subsc.Identifier.Equals(channel) {
+		if subsc.Subscription != nil && subsc.Identifier.Equals(channel) {
 			l.Debugf("[%v#%v] Unsubscribe: %+v", c.id, subsc.Id, channel)
 			c.subscriptions = append(c.subscriptions[:i], c.subscriptions[i+1:]...)
 			subsc.Unsubscribe()
@@ -446,7 +449,7 @@ func (c *Client) Unsubscribe(channel *actioncable.ChannelIdentifier) (string, er
 
 func (c *Client) Send(channel *actioncable.ChannelIdentifier, message map[string]interface{}) (string, error) {
 	for _, subsc := range c.subscriptions {
-		if subsc.Identifier.Equals(channel) {
+		if subsc.Subscription != nil && subsc.Identifier.Equals(channel) {
 			l.Debugf("[%v#%v] Received message: %+v", c.id, subsc.Id, message)
 			subsc.Send(message)
 			return subsc.Id, nil
