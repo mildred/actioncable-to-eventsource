@@ -56,13 +56,17 @@ type Client struct {
 	lastId          int
 	es              *Broker
 	cable           *actioncable.Consumer
-	subscriptions   []*Subscription
 	authHeaders     http.Header
-	events          chan *WsEvent
-	eventsLock      sync.Mutex
-	eventsDropped   int
-	cleanCtx        context.Context
-	cleanCancel     context.CancelFunc
+
+	subscriptions     []*Subscription
+	subscriptionsLock sync.Mutex
+
+	events        chan *WsEvent
+	eventsLock    sync.Mutex
+	eventsDropped int
+
+	cleanCtx    context.Context
+	cleanCancel context.CancelFunc
 }
 
 func setRequestOriginIfNotSet(id string, r *http.Request) {
@@ -411,6 +415,15 @@ func (ch *ChanHandler) OnError(err error) {
 }
 
 func (c *Client) Subscribe(channel *actioncable.ChannelIdentifier) (string, error) {
+	c.subscriptionsLock.Lock()
+	defer c.subscriptionsLock.Unlock()
+
+	for _, subsc := range c.subscriptions {
+		if subsc.Identifier.Equals(channel) {
+			return subsc.Id, nil
+		}
+	}
+
 	id := ksuid.New().String()
 	l.Debugf("[%v#%v] Subscribe: %+v", c.id, id, channel)
 	subsc, err := c.cable.Subscriptions.Create(channel)
