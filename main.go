@@ -241,9 +241,6 @@ func (c *Client) ServeHTTPAvailableEvents(ctx context.Context, w http.ResponseWr
 	res.Messages = []*WsEvent{}
 	res.Channels = []string{}
 	res.SessionId = c.sessionId
-	for _, subsc := range c.subscriptions {
-		res.Channels = append(res.Channels, subsc.Id)
-	}
 
 	Loop:
 	for {
@@ -267,6 +264,9 @@ func (c *Client) ServeHTTPAvailableEvents(ctx context.Context, w http.ResponseWr
 
 	res.QueueLength = len(c.events)
 	res.Dropped = c.getDropped()
+	for _, subsc := range c.subscriptions {
+		res.Channels = append(res.Channels, subsc.Id)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
