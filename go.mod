@@ -10,4 +10,4 @@ require (
 	github.com/smartystreets/goconvey v1.7.2 // indirect
 )
 
-replace github.com/potato2003/actioncable-client-go => github.com/mildred/actioncable-client-go v0.0.0-20220824160057-a8880925508f
+replace github.com/potato2003/actioncable-client-go => github.com/mildred/actioncable-client-go v0.0.0-20230306143345-00ce6b915fba
